@@ -16,7 +16,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let detail = ''
     try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
     const msg = detail || `${res.status} ${res.statusText}`
-    toast(msg, 'error')
+    // 401 (未登录/会话过期) 不弹 toast — 由全局认证拦截器统一跳登录页, 避免刷屏
+    if (res.status !== 401) toast(msg, 'error')
     throw new Error(msg)
   }
   return res.json() as Promise<T>
@@ -676,6 +677,7 @@ export interface Preferences {
   limit_ladder_monitor_enabled: boolean
   depth_polling_interval: number
   depth_finalize_time: { hour: number; minute: number }
+  review_schedule: { enabled: boolean; hour: number; minute: number }
   sse_refresh_pages: Record<string, boolean>
   strategy_monitor_enabled: boolean
   strategy_monitor_ids: string[]
@@ -702,6 +704,27 @@ export interface StrategyAlertEvent {
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
+
+  // ===== Auth (访问认证) =====
+  authStatus: () =>
+    request<{ configured: boolean; authenticated: boolean }>('/api/auth/status'),
+  authSetup: (password: string) =>
+    request<{ ok: boolean }>('/api/auth/setup', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  authLogin: (password: string) =>
+    request<{ ok: boolean }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  authLogout: () =>
+    request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  authChangePassword: (oldPassword: string, newPassword: string) =>
+    request<{ ok: boolean }>('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+    }),
 
   settings: () => request<SettingsState>('/api/settings'),
   saveTickflowKey: (api_key: string) =>
@@ -819,6 +842,11 @@ export const api = {
     request<{ hour: number; minute: number }>('/api/settings/preferences/pipeline-schedule', {
       method: 'PUT',
       body: JSON.stringify({ hour, minute }),
+    }),
+  updateReviewSchedule: (enabled: boolean, hour: number, minute: number) =>
+    request<{ enabled: boolean; hour: number; minute: number }>('/api/settings/preferences/review-schedule', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled, hour, minute }),
     }),
   updateDepthPollingInterval: (interval: number) =>
     request<{ depth_polling_interval: number }>('/api/settings/preferences/depth-polling-interval', {
@@ -1239,6 +1267,13 @@ export const api = {
   extDataPullRun: (id: string) =>
     request<{ status: string; rows: number; date: string }>(
       `/api/ext-data/${id}/pull/run`,
+      { method: 'POST' },
+    ),
+
+  // 内置预设 (概念/行业) 手动获取数据: 走结构转换, 保证 schema 一致
+  extDataPresetFetch: (id: string) =>
+    request<{ status: string; rows: number }>(
+      `/api/ext-data/presets/${id}/fetch`,
       { method: 'POST' },
     ),
 

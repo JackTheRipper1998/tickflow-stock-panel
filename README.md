@@ -111,7 +111,7 @@ docker compose up --build
 <details>
 <summary><b>环境适配与高级选项(老 CPU · 手动启动 · 回测依赖)</b></summary>
 
-**老 CPU 兼容(avx2/fma 缺失报错或 exit 132)**:在 `.env` 打开 `BACKEND_EXTRAS=legacy-cpu` 后重建,会给 Polars 切到 `rtcompat` 运行时;需回测则 `BACKEND_EXTRAS=legacy-cpu backtest`。
+**老 CPU 兼容(avx2/fma 缺失报错或 exit 132)**:桌面客户端安装包已内置兼容内核(新老 CPU 通吃)。Docker / 源码用户在 `.env` 打开 `BACKEND_EXTRAS=legacy-cpu` 后重建,会给 Polars 切到 `rtcompat` 运行时;需回测则 `BACKEND_EXTRAS=legacy-cpu backtest`。
 
 **手动分别启动:**
 
@@ -127,6 +127,23 @@ cd frontend && pnpm install && pnpm dev   # http://localhost:3011
 **回测依赖**:vectorbt → numba 体积较大,作为可选 extras(`uv sync --extra backtest`)。macOS / Intel 无预构建 wheel 时需 `brew install cmake` 现场编译。
 
 </details>
+
+### 🔄 更新代码(已部署用户必读)
+
+拉取新版本只需一条命令:
+
+```bash
+git pull
+```
+
+**整个 `data/` 目录都不纳入 git**——行情 K线、财务、自选、回测、监控记录,乃至概念/行业扩展数据,全部是程序运行时生成/拉取的用户数据,`git pull` 物理上无法影响它们。新用户首次启动时,概念/行业两份扩展数据会自动从远程接口拉取,无需任何手动操作。
+
+> ⚠️ **切勿使用以下命令"解决冲突"或"清理",它们会一次性删光 `data/` 下所有未被 git 跟踪的数据:**
+> - `git clean -fdx`(最危险,会删掉所有 `.gitignore` 忽略的文件)
+> - `git reset --hard`
+> - 直接删除整个项目文件夹重新 `git clone`
+>
+> 若 `git pull` 报冲突,通常是本地误改了被跟踪的文件,请先 `git stash` 暂存再 pull,或单独联系作者,不要直接执行上面的命令。
 
 ### 🧭 跑起来后的第一次使用
 
