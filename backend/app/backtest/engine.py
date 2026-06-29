@@ -32,8 +32,8 @@ class MatcherConfig:
     # matching 为向后兼容入口: 仅传 matching 时, entry_fill/exit_fill 都取 matching 的值。
     # 显式传入 entry_fill/exit_fill 时以二者为准 (允许建仓/清仓口径不同)。
     matching: Literal["close_t", "open_t+1"] = "close_t"
-    entry_fill: Literal["close_t", "open_t+1"] | None = None
-    exit_fill: Literal["close_t", "open_t+1"] | None = None
+    entry_fill: Literal["close_t", "open_t+1", "after_950", "tail", "after_1300"] | None = None
+    exit_fill: Literal["close_t", "open_t+1", "after_950", "high_t+1"] | None = None
     fees_pct: float = 0.0002
     slippage_bps: float = 5.0
     stop_loss_pct: float | None = None
@@ -276,14 +276,26 @@ class BacktestEngine:
         same_prev_symbol = np.zeros(n, dtype=bool)
         same_prev_symbol[1:] = panel_symbols[1:] == panel_symbols[:-1]
 
-        entry_prices = open_prices if config.entry_fill == "open_t+1" else close_prices
-        exit_prices = open_prices if config.exit_fill == "open_t+1" else close_prices
+        pm_prices = (open_prices + close_prices) / 2
+        if config.entry_fill in ("open_t+1", "after_950"):
+            entry_prices = open_prices
+        elif config.entry_fill == "after_1300":
+            entry_prices = pm_prices
+        else:
+            entry_prices = close_prices
+        high_prices_arr = panel["high"].to_numpy() if "high" in panel.columns else open_prices
+        if config.exit_fill == "open_t+1":
+            exit_prices = open_prices
+        elif config.exit_fill == "high_t+1":
+            exit_prices = high_prices_arr
+        else:
+            exit_prices = close_prices
 
-        if config.entry_fill == "open_t+1":
+        if config.entry_fill in ("open_t+1", "after_1300"):
             ent_s = np.zeros(n, dtype=bool)
             ent_s[1:] = ent[:-1] & same_prev_symbol
             ent = ent_s
-        if config.exit_fill == "open_t+1":
+        if config.exit_fill in ("open_t+1", "high_t+1"):
             ext_s = np.zeros(n, dtype=bool)
             ext_s[1:] = ext[:-1] & same_prev_symbol
             ext = ext_s
@@ -407,9 +419,10 @@ class BacktestEngine:
         exit_signal_dates = np.array([None] * n, dtype=object)
         same_prev_symbol = panel_symbols[1:] == panel_symbols[:-1]
 
-        # 建仓口径: close_t 用信号日收盘, open_t+1 右移到次日 open 成交。
+        # 建仓口径: close_t 用信号日收盘; open_t+1/after_950/tail 右移到次日成交。
+        # after_950=次日开盘后(日线近似用open), tail=次日尾盘(用close)。
         ent = np.zeros(n, dtype=bool)
-        if config.entry_fill == "open_t+1":
+        if config.entry_fill in ("open_t+1", "after_950", "tail", "after_1300"):
             ent[1:] = ent_raw[:-1] & same_prev_symbol
             for idx in np.flatnonzero(ent):
                 entry_signal_dates[idx] = self._date_str(panel_dates[idx - 1])
@@ -418,9 +431,9 @@ class BacktestEngine:
             for idx in np.flatnonzero(ent):
                 entry_signal_dates[idx] = self._date_str(panel_dates[idx])
 
-        # 清仓口径: 独立于建仓, close_t 用信号日收盘, open_t+1 右移到次日 open。
+        # 清仓口径: close_t 用信号日收盘; open_t+1/after_950/high_t+1 右移到次日。
         ext = np.zeros(n, dtype=bool)
-        if config.exit_fill == "open_t+1":
+        if config.exit_fill in ("open_t+1", "after_950", "high_t+1"):
             ext[1:] = ext_raw[:-1] & same_prev_symbol
             for idx in np.flatnonzero(ext):
                 exit_signal_dates[idx] = self._date_str(panel_dates[idx - 1])
@@ -433,16 +446,27 @@ class BacktestEngine:
         high_prices = panel["high"].to_numpy() if "high" in panel.columns else open_prices
         low_prices = panel["low"].to_numpy()
         close_prices = panel["close"].to_numpy()
-        # 撮合价: 建仓/清仓各自独立选列。
-        entry_prices = open_prices if config.entry_fill == "open_t+1" else close_prices
-        exit_prices = open_prices if config.exit_fill == "open_t+1" else close_prices
+        # 撮合价: open_t+1/after_950 用开盘价; after_1300 用 (open+close)/2; high_t+1 用次日最高价; tail/close_t 用收盘价。
+        pm_prices = (open_prices + close_prices) / 2
+        if config.entry_fill in ("open_t+1", "after_950"):
+            entry_prices = open_prices
+        elif config.entry_fill == "after_1300":
+            entry_prices = pm_prices
+        else:
+            entry_prices = close_prices
+        if config.exit_fill in ("open_t+1", "after_950"):
+            exit_prices = open_prices
+        elif config.exit_fill == "high_t+1":
+            exit_prices = high_prices
+        else:
+            exit_prices = close_prices
         has_volume = "volume" in panel.columns
         volumes = panel["volume"].fill_null(0).to_numpy() if has_volume else np.ones(n, dtype=float)
         names = panel["name"].fill_null("").to_numpy() if "name" in panel.columns else np.array([""] * n)
         scores = panel["score"].fill_null(0).to_numpy() if "score" in panel.columns else np.zeros(n, dtype=float)
         trade_scores = scores.copy()
         # 评分跟随建仓口径 shift (评分在买入日生效)。
-        if config.entry_fill == "open_t+1":
+        if config.entry_fill in ("open_t+1", "after_950", "tail", "after_1300"):
             trade_scores[1:] = np.where(panel_symbols[1:] == panel_symbols[:-1], scores[:-1], trade_scores[1:])
         limit_up_flags = (
             panel["signal_limit_up"].fill_null(False).to_numpy().astype(bool)
@@ -735,9 +759,9 @@ class BacktestEngine:
         exit_signal_dates = np.array([None] * n, dtype=object)
         same_prev_symbol = panel_symbols[1:] == panel_symbols[:-1]
 
-        # 建仓口径: close_t 用信号日收盘, open_t+1 右移到次日 open 成交。
+        # 建仓口径: close_t 用信号日收盘, open_t+1/after_1300 右移到次日成交。
         ent = np.zeros(n, dtype=bool)
-        if config.entry_fill == "open_t+1":
+        if config.entry_fill in ("open_t+1", "after_1300"):
             ent[1:] = ent_raw[:-1] & same_prev_symbol
             for idx in np.flatnonzero(ent):
                 entry_signal_dates[idx] = self._date_str(panel_dates[idx - 1])
@@ -748,7 +772,7 @@ class BacktestEngine:
 
         # 清仓口径: 独立于建仓。
         ext = np.zeros(n, dtype=bool)
-        if config.exit_fill == "open_t+1":
+        if config.exit_fill in ("open_t+1", "high_t+1"):
             ext[1:] = ext_raw[:-1] & same_prev_symbol
             for idx in np.flatnonzero(ext):
                 exit_signal_dates[idx] = self._date_str(panel_dates[idx - 1])
@@ -761,9 +785,20 @@ class BacktestEngine:
         high_prices = panel["high"].to_numpy() if "high" in panel.columns else open_prices
         low_prices = panel["low"].to_numpy()
         close_prices = panel["close"].to_numpy()
-        # 撮合价: 建仓/清仓各自独立选列。
-        entry_prices = open_prices if config.entry_fill == "open_t+1" else close_prices
-        exit_prices = open_prices if config.exit_fill == "open_t+1" else close_prices
+        # 撮合价: open_t+1/after_950 用开盘价; after_1300 用 (open+close)/2; high_t+1 用次日最高价; tail/close_t 用收盘价。
+        pm_prices = (open_prices + close_prices) / 2
+        if config.entry_fill in ("open_t+1", "after_950"):
+            entry_prices = open_prices
+        elif config.entry_fill == "after_1300":
+            entry_prices = pm_prices
+        else:
+            entry_prices = close_prices
+        if config.exit_fill in ("open_t+1", "after_950"):
+            exit_prices = open_prices
+        elif config.exit_fill == "high_t+1":
+            exit_prices = high_prices
+        else:
+            exit_prices = close_prices
         has_volume = "volume" in panel.columns
         volumes = panel["volume"].fill_null(0).to_numpy() if has_volume else np.ones(n, dtype=float)
         names = (
@@ -776,7 +811,7 @@ class BacktestEngine:
         )
         trade_scores = scores.copy()
         # 评分跟随建仓口径 shift (评分在买入日生效)。
-        if config.entry_fill == "open_t+1":
+        if config.entry_fill in ("open_t+1", "after_950", "tail", "after_1300"):
             trade_scores[1:] = np.where(panel_symbols[1:] == panel_symbols[:-1], scores[:-1], trade_scores[1:])
         limit_up_flags = (
             panel["signal_limit_up"].fill_null(False).to_numpy().astype(bool)

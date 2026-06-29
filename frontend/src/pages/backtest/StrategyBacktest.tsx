@@ -608,8 +608,8 @@ export function StrategyBacktest() {
   const [end, setEnd] = useState(saved?.end ?? TODAY)
   // 成交口径: 建仓/清仓可独立配置。向后兼容老 matching (派生为 entry=exit=matching)。
   const [matching] = useState<'close_t' | 'open_t+1'>(saved?.matching ?? 'open_t+1')
-  const [entryFill, setEntryFill] = useState<'close_t' | 'open_t+1'>(saved?.entryFill ?? saved?.matching ?? 'open_t+1')
-  const [exitFill, setExitFill] = useState<'close_t' | 'open_t+1'>(saved?.exitFill ?? saved?.matching ?? 'close_t')
+  const [entryFill, setEntryFill] = useState<'close_t' | 'open_t+1' | 'after_950' | 'tail' | 'after_1300'>(saved?.entryFill ?? saved?.matching ?? 'open_t+1')
+  const [exitFill, setExitFill] = useState<'close_t' | 'open_t+1' | 'after_950' | 'high_t+1'>(saved?.exitFill ?? saved?.matching ?? 'close_t')
   const [fees, setFees] = useState(saved?.fees ?? '2')
   const [maxPositions, setMaxPositions] = useState(saved?.maxPositions ?? '10')
   const [maxExposure, setMaxExposure] = useState(saved?.maxExposure ?? '100')
@@ -1200,6 +1200,9 @@ export function StrategyBacktest() {
             <label className="text-xs font-medium text-secondary block mb-1.5">建仓口径</label>
             <select value={entryFill} onChange={e => setEntryFill(e.target.value as any)} className={INPUT_CLS}>
               <option value="open_t+1">次日开盘成交（推荐）</option>
+              <option value="after_950">次日9:50后买入</option>
+              <option value="after_1300">次日下午开盘买入（13:00）</option>
+              <option value="tail">次日尾盘买入</option>
               <option value="close_t">信号日收盘成交</option>
             </select>
           </div>
@@ -1207,11 +1210,13 @@ export function StrategyBacktest() {
             <label className="text-xs font-medium text-secondary block mb-1.5">清仓口径</label>
             <select value={exitFill} onChange={e => setExitFill(e.target.value as any)} className={INPUT_CLS}>
               <option value="close_t">到期/信号日收盘成交（推荐）</option>
+              <option value="high_t+1">次日最高价卖出</option>
+              <option value="after_950">次日9:50后清仓</option>
               <option value="open_t+1">次日开盘成交</option>
             </select>
           </div>
         </div>
-        <div className="mt-1 text-[10px] leading-4 text-muted">建仓默认次日开盘（避免未来函数），清仓默认当日收盘（持仓中可盘中/收盘卖）；买卖点由策略触发器决定，这里只决定成交价。</div>
+        <div className="mt-1 text-[10px] leading-4 text-muted">建仓默认次日开盘（避免未来函数），清仓默认当日收盘；9:50后等开盘稳定再操作，下午开盘用次日 (开盘+收盘)/2 近似 13:00 价格，尾盘买入用次日收盘价模拟。日线回测价格精度有限，仅供参考。</div>
 
         {simMode === 'position' && (
         <div className="grid grid-cols-2 gap-2">
