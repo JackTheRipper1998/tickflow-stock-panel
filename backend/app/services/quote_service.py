@@ -60,6 +60,10 @@ class QuoteService:
         self._depth_update_event = threading.Event()  # SSE 通知: depth 五档修正后 set (刷新连板梯队)
         self._pending_alerts: list[dict] = []    # 待推送的告警
         self._max_pending_alerts: int = 1000     # 背压上限: 超出丢弃最旧
+        # 复盘进度 SSE 通道: 定时复盘流式生成时, 把 meta/delta/done 事件推给开着页面的前端
+        self._review_event = threading.Event()        # SSE 通知: 有复盘进度事件时 set
+        self._pending_review: list[str] = []          # 待推送的复盘事件(JSON 字符串)
+        self._max_pending_review: int = 200           # 背压上限: 超出丢弃最旧
         self._strategy_monitor = None            # 延迟注入
         self._app_state = None                   # 延迟注入 (FastAPI app.state)
 
@@ -189,6 +193,34 @@ class QuoteService:
             alerts = self._pending_alerts
             self._pending_alerts = []
             return alerts
+
+    # ================================================================
+    # 复盘进度 SSE 通道 — 定时复盘流式生成时, 把事件实时推给前端
+    # ================================================================
+    def push_review_event(self, event_json: str) -> None:
+        """追加一条复盘进度事件(JSON 字符串), 并唤醒 SSE generator。
+
+        事件格式与 recap_market_stream 的产出一致(meta/delta/error/done),
+        前端 reviewStore 直接消费。背压: 超过上限丢弃最旧(复盘流几百条 delta, 200 够用)。
+        """
+        with self._lock:
+            self._pending_review.append(event_json)
+            if len(self._pending_review) > self._max_pending_review:
+                overflow = len(self._pending_review) - self._max_pending_review
+                self._pending_review = self._pending_review[overflow:]
+            self._review_event.set()
+
+    def wait_for_review(self, timeout: float = 30.0) -> bool:
+        """阻塞等待复盘进度事件 (供 SSE 线程使用)。"""
+        self._review_event.clear()
+        return self._review_event.wait(timeout=timeout)
+
+    def pop_review_events(self) -> list[str]:
+        """取走所有待推送的复盘事件 (线程安全)。"""
+        with self._lock:
+            events = self._pending_review
+            self._pending_review = []
+            return events
 
     # ================================================================
     # 档位感知间隔限制
@@ -635,6 +667,8 @@ class QuoteService:
                 return
 
             all_alerts: list[dict] = []
+            rule_events: list[dict] = []
+            engine = None
 
             # 通用监控规则评估 (统一引擎: signal/price/market/strategy)
             if self._app_state:
@@ -675,11 +709,13 @@ class QuoteService:
                                 "change_pct": ev["change_pct"],
                                 "signals": ev["signals"],
                                 "severity": ev.get("severity", "info"),
+                                "conditions": ev.get("conditions") or [],
+                                "logic": ev.get("logic") or "and",
                             })
 
-            # Free 自选实时只刷新少量标的, 不写全市场策略缓存。
-            if self._enabled and self._app_state and self.realtime_mode() == "full_market":
-                self._refresh_strategy_cache(enriched_today, enriched_date)
+            # 策略页实时回显: 不写文件 (实时行情每轮更新 enriched, 写文件会被 read_cache
+            # 的 mtime 校验判过期, 反复读不到)。监控引擎本轮已算出的结果存在内存
+            # (latest_strategy_results), 由 /api/screener/cached 端点直接叠加读取。
 
             # 推入待推送队列 + 通知 SSE (含背压保护)
             if all_alerts:
@@ -696,8 +732,58 @@ class QuoteService:
                 # cooldown 去重已在 MonitorRuleEngine 做过, 这里只负责转发。
                 self._maybe_send_system_notifications(all_alerts)
 
+            # Webhook 推送 (飞书等外部 IM, 由规则 webhook_enabled 开关控制)。
+            # 紧随系统通知, 同样静默降级不阻断主流程。
+            if rule_events:
+                self._maybe_send_webhook(rule_events, engine)
+
         except Exception as e:  # noqa: BLE001
             logger.warning("监控评估失败: %s", e)
+
+    def _maybe_send_webhook(self, rule_events: list[dict], engine) -> None:
+        """把告警通过 Webhook 推送到外部 IM (由规则 webhook_enabled 开关控制)。
+
+        - 全局飞书 URL 未配置: 直接返回
+        - 仅推送 webhook_enabled=True 的规则触发的告警
+        - 失败静默, 不阻断主流程
+        - 去重: 复用 MonitorRuleEngine 的 cooldown, 此处不重复去重
+
+        注意: 用 rule_events (含 rule_id) 而非重建后的 all_alerts,
+        以便反查引擎规则判断是否启用推送。
+        """
+        try:
+            from app.services import preferences
+            from app.services import webhook_adapter
+
+            url = preferences.get_feishu_webhook_url()
+            if not url:
+                return
+            secret = preferences.get_feishu_webhook_secret()
+
+            # 反查规则, 过滤出启用推送的事件
+            source_labels = {
+                "strategy": "策略", "signal": "信号",
+                "price": "价格", "market": "异动",
+            }
+            rules = engine.rules if engine is not None else {}
+            pushed = 0
+            for ev in rule_events:
+                rule = rules.get(ev.get("rule_id"))
+                if not rule or not rule.get("webhook_enabled"):
+                    continue
+                source = ev.get("source", "")
+                source_label = source_labels.get(source, source or "通知")
+                symbol = ev.get("symbol") or ""
+                name = ev.get("name") or ""
+                message = ev.get("message") or ""
+                title = f"TickFlow · {source_label}"
+                body = f"{symbol} {name} {message}".strip() if symbol else (message or name)
+                if webhook_adapter.send_feishu(url, title, body, secret):
+                    pushed += 1
+            if pushed:
+                logger.info("飞书 Webhook 推送: %d 条", pushed)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Webhook 推送异常 (不影响告警主流程): %s", e)
 
     def _maybe_send_system_notifications(self, all_alerts: list[dict]) -> None:
         """把告警转发到操作系统通知中心 (由 preferences 开关控制)。
@@ -736,90 +822,6 @@ class QuoteService:
                 notify_adapter.notify(title, body)
         except Exception as e:  # noqa: BLE001
             logger.debug("系统通知发送异常 (不影响告警主流程): %s", e)
-
-    def _refresh_strategy_cache(self, enriched_today: pl.DataFrame, enriched_date: date | None) -> None:
-        """利用已计算好的 enriched 数据，运行策略池并写入缓存。"""
-        import math
-        from dataclasses import asdict
-        from app.services import strategy_cache
-        from app.services.screener import PRESET_STRATEGIES, ScreenerService
-        from app.strategy import config as strategy_config
-
-        try:
-            if enriched_date is None:
-                return
-            as_of = enriched_date
-            data_dir = self._repo.store.data_dir
-            svc = ScreenerService(self._repo)
-            engine = getattr(self._app_state, "strategy_engine", None)
-
-            # 确定要运行的策略: 策略监控池中的策略
-            monitor_ids = self._get_monitor_pool_ids()
-            if not monitor_ids:
-                return
-
-            # 一次加载所有 override
-            all_overrides = strategy_config.list_overrides(data_dir)
-
-            # 历史策略: 只在需要时加载
-            shared_history = None
-            history_strats = []
-            if engine:
-                id_set = set(monitor_ids)
-                history_strats = [
-                    (sid, s) for sid, s in engine._strategies.items()
-                    if s.filter_history_fn and sid in id_set
-                ]
-                if history_strats:
-                    max_lb = max(s.lookback_days for _, s in history_strats)
-                    shared_history = svc._load_enriched_history(as_of, max(1, max_lb))
-
-            results: dict[str, dict] = {}
-            for sid in monitor_ids:
-                try:
-                    overrides = all_overrides.get(sid, {})
-                    bf = overrides.get("basic_filter") if overrides else None
-                    dl = overrides.get("display_limit") if overrides else None
-                    if dl is None and overrides and "display_limit" in overrides:
-                        dl = 0
-
-                    if sid in PRESET_STRATEGIES:
-                        r = svc.run_preset(sid, as_of=as_of, precomputed=enriched_today, basic_filter=bf, display_limit=dl)
-                    elif engine:
-                        r = engine.run(
-                            sid, as_of, overrides=overrides or None,
-                            precomputed=enriched_today, precomputed_history=shared_history,
-                        )
-                        if dl is not None and dl > 0:
-                            r.rows = r.rows[:dl]
-                            r.total = min(r.total, dl)
-                    else:
-                        continue
-
-                    # sanitize NaN/Inf
-                    rows = []
-                    for row_dict in asdict(r).get("rows", []):
-                        for k, v in list(row_dict.items()):
-                            if isinstance(v, float) and not math.isfinite(v):
-                                row_dict[k] = None
-                        rows.append(row_dict)
-                    results[sid] = {"total": r.total, "as_of": str(as_of), "rows": rows}
-                except Exception:  # noqa: BLE001
-                    continue
-
-            if results:
-                strategy_cache.write_cache(data_dir, str(as_of), results)
-
-        except Exception as e:  # noqa: BLE001
-            logger.warning("策略缓存刷新失败: %s", e)
-
-    def _get_monitor_pool_ids(self) -> list[str]:
-        """获取策略监控池中的策略 ID 列表。"""
-        from app.services import preferences
-        ids = preferences.get_strategy_monitor_ids()
-        if not ids:
-            return []
-        return [sid for sid in ids if sid]
 
     @staticmethod
     def _get_strategy_monitor():

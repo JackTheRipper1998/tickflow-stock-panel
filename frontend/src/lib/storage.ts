@@ -91,6 +91,7 @@ export const storage = {
     entryFill: 'close_t' | 'open_t+1'
     exitFill: 'close_t' | 'open_t+1'
     fees: string
+    slippage: string
     maxPositions: string
     maxExposure: string
     initialCapital: string
@@ -110,4 +111,6 @@ export const storage = {
 
   /** 数据页画像卡片显隐 (卡片key → 是否显示) */
   dataCardVisible: kv<Record<string, boolean>>('data-card-visible'),
+  /** 数据页画像卡片顺序 (卡片key 数组, 长度=卡片总数) */
+  dataCardOrder: kv<string[]>('data-card-order'),
 } as const

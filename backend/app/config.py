@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     ai_base_url: str = "https://api.alysc.top"
     ai_api_key: str = ""
     ai_model: str = "gpt-5.5"
+    ai_codex_command: str = "codex"
     # 默认浏览器风格 UA,绕过 Cloudflare 等 CDN/WAF 的 Bot 拦截(Issue #8)。
     # 用户可在 AI 设置页按需修改。
     ai_user_agent: str = (
@@ -93,6 +94,10 @@ class Settings(BaseSettings):
     port: int = 3018
     log_level: str = "INFO"
     backtest_range_guard: bool = False
+
+    # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
+    # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
+    auth_password: str = ""
 
     # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
     # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)

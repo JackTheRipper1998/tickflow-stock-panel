@@ -110,6 +110,9 @@ def run_now(
     today = _date.today()
     today_exists = latest_daily and latest_daily >= today
     new_daily_days = 0
+    # 日K范围拉取的起点(分支3补缺口/分支4首次); 实时增量/跳过时为 None。
+    # 供 Step 1.5 除权因子回溯范围对齐: 范围拉取→用日K范围, 非范围→最近N天兜底。
+    daily_range_start: _date | None = None
 
     # A 股日K拉取开关(默认开);关闭时跳过日K同步,保留已有数据
     pull_a_share = _prefs.get_pipeline_pull_a_share()
@@ -130,6 +133,7 @@ def run_now(
         # 也覆盖"今天已有数据但无实时行情权限(free/none)"的降级场景:
         #   此时 start_date = latest_daily = today,batch 刷新当天日K。
         start_date = latest_daily
+        daily_range_start = start_date
         emit("sync_daily", 12, f"获取日K [{start_date} ~ {today}]…")
         logger.info("sync_daily: [%s ~ %s] %s", start_date, today,
                     "refresh today" if today_exists else "gap fill")
@@ -150,6 +154,7 @@ def run_now(
     else:
         # 首次：无任何数据 → batch 拉 1 年
         start_date = today - _td(days=365)
+        daily_range_start = start_date
         emit("sync_daily", 12, f"获取日K [{start_date} ~ {today}]…")
         logger.info("sync_daily: [%s ~ %s] initial fetch", start_date, today)
 
@@ -167,36 +172,22 @@ def run_now(
         logger.info("sync_daily: [%s ~ %s] done", start_date, today)
     _invalidate("daily")
 
-    # Step 1.5: 增量同步除权因子 — 从已有数据最新日期的下一天开始获取
+    # Step 1.5: 同步除权因子 — 范围与日K拉取方式对齐
+    #   日K范围拉取(补缺口/首次) → 除权用日K范围 [daily_range_start, now]
+    #     首次会覆盖整个日K区间内的历史除权事件; 补缺口天然只增量(起点=latest_daily≈昨天)
+    #   日K实时增量/跳过(分支2/分支1) → 除权兜底拉最近 30 天, 补可能遗漏的新除权
+    #     (这两类分支不拉历史日K, 除权不能用日K范围, 只能兜底最近几日)
     written_adj = 0
     affected_symbols: list[str] = []
     if capset.has(Cap.ADJ_FACTOR):
         from datetime import datetime, timedelta
         adj_end = datetime.now()
-        # 从已有除权因子数据的最新日期开始获取，避免重复拉取
-        adj_factor_path = repo.store.data_dir / "adj_factor" / "all.parquet"
-        fallback_start = adj_end - timedelta(days=30)
-        if adj_factor_path.exists():
-            try:
-                from datetime import date as date_cls
-                max_date = pl.scan_parquet(adj_factor_path).select(
-                    pl.col("trade_date").max()
-                ).collect().item()
-                if max_date is not None:
-                    # trade_date 可能是 date / datetime / string 类型
-                    if isinstance(max_date, str):
-                        td = date_cls.fromisoformat(max_date)
-                    elif isinstance(max_date, datetime):
-                        td = max_date.date()
-                    else:
-                        td = max_date
-                    adj_start = datetime.combine(td, datetime.min.time())
-                else:
-                    adj_start = fallback_start
-            except Exception:
-                adj_start = fallback_start
+        if daily_range_start is not None:
+            adj_start = datetime.combine(daily_range_start, datetime.min.time())
         else:
-            adj_start = fallback_start
+            # 日K实时增量/跳过时, 除权兜底拉最近 N 天, 覆盖周末/长假/停机期间的新除权事件。
+            # 15 天: 覆盖春节/国庆最长约10天长假 + 故障恢复缓冲; sync_adj_factor 内部 merge+unique 幂等, 多拉无副作用。
+            adj_start = adj_end - timedelta(days=15)
         adj_start_str = adj_start.strftime("%Y-%m-%d")
         adj_end_str = adj_end.strftime("%Y-%m-%d")
         emit("sync_adj", 50, f"获取除权因子 [{adj_start_str} ~ {adj_end_str}]…")
@@ -312,33 +303,46 @@ def run_now(
         if pull_etf:
             _types.append("ETF")
         emit("sync_index", 88, f"同步{'+'.join(_types)}日K…")
+        # 子阶段进度分配: 88.0(开始) → 89.0(完成), 指数占前半, ETF 占后半
         try:
             if pull_index:
+                emit("sync_index", 88, "同步指数维表…")
                 index_count = index_sync.sync_index_instruments(repo, pull_index=True, pull_etf=False)
+                emit("sync_index", 88, f"指数维表完成,{index_count} 只")
                 index_dir = repo.store.data_dir / "kline_index_enriched"
                 index_dates = sorted(
                     d.name[5:] for d in index_dir.glob("date=*")
                     if d.is_dir() and d.name.startswith("date=")
                 ) if index_dir.exists() else []
                 index_start = _date.fromisoformat(index_dates[-1]) if index_dates else today - _td(days=365)
+
+                def _index_chunk(cur: int, tot: int) -> None:
+                    emit("sync_index", 88, f"指数日K批次 {cur}/{tot}",
+                         stage_pct=int(100 * cur / tot) if tot else 100, skip_log=cur < tot)
+
                 written_index_daily = index_sync.sync_and_persist_index_daily(
                     repo,
                     capset,
                     start_date=_dt.combine(index_start, _dt.min.time()),
                     end_date=_dt.combine(today, _dt.min.time()),
+                    on_chunk_done=_index_chunk,
                 )
+                emit("sync_index", 88, f"指数日K完成,{written_index_daily} 行")
                 _invalidate("index_instruments")
                 _invalidate("index_daily")
                 _invalidate("index_enriched")
 
             if pull_etf:
+                emit("sync_index", 88, "同步 ETF 维表…")
                 etf_count = index_sync.sync_etf_instruments(repo)
+                emit("sync_index", 88, f"ETF 维表完成,{etf_count} 只")
                 etf_symbols: list[str] = []
                 etf_inst = repo.get_etf_instruments()
                 if not etf_inst.is_empty() and "symbol" in etf_inst.columns:
                     etf_symbols = sorted(set(etf_inst["symbol"].to_list()))
                 if etf_symbols and capset.has(Cap.ADJ_FACTOR):
                     try:
+                        emit("sync_index", 88, "同步 ETF 除权因子…")
                         from datetime import datetime, timedelta
                         adj_end = datetime.now()
                         adj_path = repo.store.data_dir / "adj_factor_etf" / "all.parquet"
@@ -361,6 +365,7 @@ def run_now(
                             end_time=adj_end,
                         )
                         etf_adj_symbols = len(affected_etfs)
+                        emit("sync_index", 88, f"ETF 除权因子完成,{etf_adj_symbols} 只")
                     except Exception as e:  # noqa: BLE001
                         logger.warning("ETF adj_factor skipped: %s", e)
                 etf_dir = repo.store.data_dir / "kline_etf_enriched"
@@ -369,12 +374,19 @@ def run_now(
                     if d.is_dir() and d.name.startswith("date=")
                 ) if etf_dir.exists() else []
                 etf_start = _date.fromisoformat(etf_dates[-1]) if etf_dates else today - _td(days=365)
+
+                def _etf_chunk(cur: int, tot: int) -> None:
+                    emit("sync_index", 88, f"ETF 日K批次 {cur}/{tot}",
+                         stage_pct=int(100 * cur / tot) if tot else 100, skip_log=cur < tot)
+
                 written_etf_daily = index_sync.sync_and_persist_etf_daily(
                     repo,
                     capset,
                     start_date=_dt.combine(etf_start, _dt.min.time()),
                     end_date=_dt.combine(today, _dt.min.time()),
+                    on_chunk_done=_etf_chunk,
                 )
+                emit("sync_index", 88, f"ETF 日K完成,{written_etf_daily} 行")
                 _invalidate("etf_instruments")
                 _invalidate("etf_daily")
 
@@ -546,13 +558,17 @@ REVIEW_JOB_ID = "scheduled_review"
 
 
 async def _run_scheduled_review(repo) -> None:
-    """定时复盘 job: 调用非流式复盘生成 → 落盘归档(与手动生成同格式)。
+    """定时复盘 job: 流式生成复盘 → 实时推 SSE(开着页面可见) → 落盘归档 → 推飞书。
 
-    静默执行, 不推送 SSE/系统通知 —— 用户下次打开复盘页即可看到新报告。
+    与手动「生成复盘」体验一致: 流式事件经 quote_service.push_review_event →
+    /api/intraday/stream 的 review_progress 事件 → 前端 reviewStore, 用户开着复盘页
+    即可看到报告边生成边显示, 切走再回来也能看到生成中/已生成。
+    LLM 偶发断流(peer closed connection)时自动重试最多 2 次。
     任何异常都吞掉只记日志, 绝不影响调度器主循环。
     """
+    import json
+
     try:
-        from app.services.market_recap import recap_market_once
         from app.services import market_recap_reports
         from app import secrets_store as ss
 
@@ -565,9 +581,14 @@ async def _run_scheduled_review(repo) -> None:
         quote_service = getattr(app_state, "quote_service", None) if app_state else None
         depth_service = getattr(app_state, "depth_service", None) if app_state else None
 
-        content, meta = await recap_market_once(repo, quote_service, depth_service)
+        content, meta = await _stream_review_with_retry(repo, quote_service, depth_service)
         if not content:
             logger.warning("scheduled review produced no content (meta=%s)", meta)
+            # 通知前端进入 error 态(若有页面在听)
+            if quote_service:
+                quote_service.push_review_event(json.dumps(
+                    {"type": "error", "message": "复盘生成失败,请稍后手动重试"},
+                    ensure_ascii=False))
             return
 
         # 落盘: 与手动生成完全相同的归档格式
@@ -580,8 +601,122 @@ async def _run_scheduled_review(repo) -> None:
             "emotion_label": meta.get("emotion_label", ""),
         })
         logger.info("scheduled review saved: as_of=%s", meta.get("as_of"))
+
+        # 通知前端: 生成完成且已归档(archived=true 让前端只刷新列表, 不重复归档)
+        if quote_service:
+            quote_service.push_review_event(json.dumps(
+                {"type": "done", "archived": True}, ensure_ascii=False))
+
+        # 推送到飞书(可选): 运行时读取配置, 用户改设置下次触发即生效。
+        # 失败静默降级, 不影响已归档的报告。
+        _maybe_push_review(content, meta)
     except Exception as e:  # noqa: BLE001
         logger.exception("scheduled review failed: %s", e)
+        # 兜底: 异常时通知前端停止「生成中」状态, 避免页面卡在 streaming
+        try:
+            app_state = _get_app_state()
+            qs = getattr(app_state, "quote_service", None) if app_state else None
+            if qs:
+                import json as _json
+                qs.push_review_event(_json.dumps(
+                    {"type": "error", "message": "复盘生成异常,请稍后手动重试"},
+                    ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _stream_review_with_retry(repo, quote_service, depth_service) -> tuple[str, dict]:
+    """流式生成复盘, 每个事件推 SSE + 累积内容。LLM 断流时最多重试 2 次。
+
+    返回 (content, meta)。重试时推一个 retry 事件让前端清空已累积内容重新开始。
+    成功(收到 done/无 error)或耗尽重试后返回。
+    """
+    import asyncio
+    import json
+    from app.services.market_recap import recap_market_stream
+
+    max_attempts = 3  # 初次 + 2 次重试
+    last_meta: dict = {}
+    content_parts: list[str] = []
+
+    for attempt in range(1, max_attempts + 1):
+        content_parts = []  # 每次重试重新累积
+        failed = False
+        try:
+            async for evt_json in recap_market_stream(repo, quote_service, depth_service):
+                evt = json.loads(evt_json)
+                t = evt.get("type")
+
+                # 推给前端(让开着页面的用户实时看到, 与手动一致)
+                if quote_service:
+                    quote_service.push_review_event(evt_json)
+
+                if t == "meta":
+                    last_meta = evt
+                elif t == "delta" and evt.get("content"):
+                    content_parts.append(evt["content"])
+                elif t == "error":
+                    failed = True
+                    logger.warning("scheduled review stream error (attempt %d/%d): %s",
+                                   attempt, max_attempts, evt.get("message"))
+                    break  # 触发重试
+                elif t == "done":
+                    # 正常完成
+                    return "".join(content_parts), last_meta
+            # 流自然结束(无 done 事件)且有内容, 视为成功
+            if content_parts and not failed:
+                return "".join(content_parts), last_meta
+        except Exception as e:  # noqa: BLE001
+            # LLM 断流等异常(httpx.RemoteProtocolError)落到这里
+            failed = True
+            logger.warning("scheduled review stream exception (attempt %d/%d): %s",
+                           attempt, max_attempts, e)
+
+        # 失败: 决定是否重试
+        if attempt < max_attempts:
+            logger.info("scheduled review retrying in 3s (attempt %d → %d)", attempt, attempt + 1)
+            # 通知前端: 即将重试, 清空已累积内容重新开始
+            if quote_service:
+                quote_service.push_review_event(json.dumps(
+                    {"type": "retry", "attempt": attempt + 1}, ensure_ascii=False))
+            await asyncio.sleep(3)
+
+    # 耗尽重试, 返回已累积内容(可能为空)和最后 meta
+    return "".join(content_parts), last_meta
+
+
+def _maybe_push_review(content: str, meta: dict) -> None:
+    """复盘报告归档后, 按 review_push_channels 选定的外部工具逐个推送完整报告。
+
+    定时生成与手动生成共用本函数 (手动归档端点 POST /api/market-recap/reports 也会调用)。
+    channels 为空则不推送; 'feishu' 复用监控中心的全局飞书 Webhook 通道。
+    推送失败静默降级 (Webhook 是辅助通道), 不影响已归档的报告。
+    """
+    try:
+        from app.services import preferences, webhook_adapter
+
+        channels = preferences.get_review_push_channels()
+        if not channels:
+            return
+
+        emotion = f"{meta.get('emotion_label') or ''}".strip()
+        as_of = meta.get("as_of") or ""
+        subtitle = as_of + (f" · 情绪 {emotion}" if emotion else "")
+
+        for ch in channels:
+            if ch == "feishu":
+                url = preferences.get_feishu_webhook_url()
+                if not url:
+                    logger.info("review push(feishu) skipped: webhook not configured")
+                    continue
+                secret = preferences.get_feishu_webhook_secret()
+                ok = webhook_adapter.send_feishu_card(
+                    url, "TickFlow · 每日复盘", subtitle, content, secret
+                )
+                logger.info("review push(feishu) %s", "sent" if ok else "failed")
+            # 未来更多渠道在此追加分支
+    except Exception as e:  # noqa: BLE001
+        logger.warning("review push error: %s", e)
 
 
 def _register_review_job(scheduler, repo, hour: int, minute: int) -> None:
@@ -589,9 +724,14 @@ def _register_review_job(scheduler, repo, hour: int, minute: int) -> None:
 
     供 start_scheduler(启动时) 和 settings API(改时间时) 共用。
     用 replace_existing=True, 重复注册只更新 trigger。
+
+    注意: _run_scheduled_review 是协程函数, 必须把函数对象本身(配合 args)传给
+    add_job, 而非用 lambda 包裹 —— 否则 APScheduler 会把 lambda 当同步函数在线程池
+    执行, 仅得到一个未 await 的协程对象, 复盘实际不会运行。
     """
     scheduler.add_job(
-        lambda: _run_scheduled_review(repo),
+        _run_scheduled_review,
+        args=[repo],
         trigger=CronTrigger(day_of_week="mon-fri",
                             hour=hour, minute=minute,
                             timezone="Asia/Shanghai"),
@@ -632,11 +772,16 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
     )
 
     # 盘后: 日 K + enriched（时间由偏好决定）
+    def _pipeline_then_refresh(on_progress=None):
+        # 与手动触发 (/api/pipeline/run) 对齐: 管道落盘后重建 Polars 内存缓存,
+        # 否则 live_agg 的昨日连板数等基准列会停留在旧交易日, 次日开盘连板梯队
+        # 整体少算一档 (仅手动触发或重启才会刷缓存, cron 调度路径此前漏了这步)。
+        result = run_now(repo, capset, on_progress=on_progress)
+        repo.refresh_cache()
+        return result
+
     scheduler.add_job(
-        lambda: _run_tracked(
-            lambda on_progress=None: run_now(repo, capset, on_progress=on_progress),
-            "daily_pipeline",
-        ),
+        lambda: _run_tracked(_pipeline_then_refresh, "daily_pipeline"),
         trigger=CronTrigger(day_of_week="mon-fri",
                             hour=sched["hour"], minute=sched["minute"],
                             timezone="Asia/Shanghai"),

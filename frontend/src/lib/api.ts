@@ -319,6 +319,14 @@ export interface OverviewMarket {
   industry_rank: { leading: OverviewDimensionRankItem[]; lagging: OverviewDimensionRankItem[] }
 }
 
+// ===== 概念涨幅轮动矩阵 =====
+// dates: 日期字符串列表(最新在最前); columns: {日期: [[概念名, 涨幅小数], ...]} 每列各自降序
+export interface RpsRotationData {
+  dates: string[]
+  columns: Record<string, [string, number][]>
+  concept_count: number
+}
+
 // ===== 大盘复盘 =====
 export interface AiReviewReport {
   id: string
@@ -357,6 +365,7 @@ export interface StrategyDetail {
   entry_signals: string[]
   exit_signals: string[]
   stop_loss: number | null
+  take_profit: number | null
   trailing_stop: number | null
   trailing_take_profit_activate: number | null
   trailing_take_profit_drawdown: number | null
@@ -442,6 +451,8 @@ export interface AlertEvent {
   signals?: string[]
   severity?: string
   strategy_id?: string
+  conditions?: MonitorCondition[]
+  logic?: 'and' | 'or'
 }
 
 /** 生成监控规则 id (时间戳 + 随机后缀), 用户无需手动填写。 */
@@ -583,6 +594,7 @@ export interface StrategyBacktestResult {
     entry_signals: string[]
     exit_signals: string[]
     stop_loss: number | null
+    take_profit: number | null
     trailing_stop: number | null
     trailing_take_profit_activate: number | null
     trailing_take_profit_drawdown: number | null
@@ -634,7 +646,9 @@ export interface SettingsState {
   ai_base_url: string
   ai_api_key_masked: string
   has_ai_key: boolean
+  ai_configured?: boolean
   ai_model: string
+  ai_codex_command?: string
   ai_user_agent: string
 }
 
@@ -678,10 +692,14 @@ export interface Preferences {
   depth_polling_interval: number
   depth_finalize_time: { hour: number; minute: number }
   review_schedule: { enabled: boolean; hour: number; minute: number }
+  review_push_channels: string[]
   sse_refresh_pages: Record<string, boolean>
   strategy_monitor_enabled: boolean
   strategy_monitor_ids: string[]
   system_notify_enabled: boolean
+  feishu_webhook_url?: string
+  feishu_webhook_secret?: string
+  webhook_enabled_default?: boolean
   sidebar_index_symbols: string[]
   nav_order: string[]
   nav_hidden: string[]
@@ -742,8 +760,8 @@ export const api = {
     ),
 
   /** 保存 AI 配置 */
-  saveAiSettings: (ai: { provider?: string; base_url?: string; api_key?: string; model?: string; user_agent?: string }) =>
-    request<{ ok: boolean }>('/api/settings/ai', {
+  saveAiSettings: (ai: { provider?: string; base_url?: string; api_key?: string; model?: string; codex_command?: string; user_agent?: string }) =>
+    request<{ ok: boolean; ai_provider?: string; ai_model?: string; ai_codex_command?: string; ai_configured?: boolean }>('/api/settings/ai', {
       method: 'POST',
       body: JSON.stringify(ai),
     }),
@@ -838,6 +856,16 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
     }),
+  updateFeishuWebhook: (url: string, secret: string = '') =>
+    request<{ feishu_webhook_url: string; feishu_webhook_secret: string }>('/api/settings/preferences/feishu-webhook', {
+      method: 'PUT',
+      body: JSON.stringify({ url, secret }),
+    }),
+  updateWebhookDefault: (enabled: boolean) =>
+    request<{ webhook_enabled_default: boolean }>('/api/settings/preferences/webhook-enabled-default', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
   updatePipelineSchedule: (hour: number, minute: number) =>
     request<{ hour: number; minute: number }>('/api/settings/preferences/pipeline-schedule', {
       method: 'PUT',
@@ -847,6 +875,11 @@ export const api = {
     request<{ enabled: boolean; hour: number; minute: number }>('/api/settings/preferences/review-schedule', {
       method: 'PUT',
       body: JSON.stringify({ enabled, hour, minute }),
+    }),
+  updateReviewPush: (channels: string[]) =>
+    request<{ review_push_channels: string[] }>('/api/settings/preferences/review-push', {
+      method: 'PUT',
+      body: JSON.stringify({ channels }),
     }),
   updateDepthPollingInterval: (interval: number) =>
     request<{ depth_polling_interval: number }>('/api/settings/preferences/depth-polling-interval', {
@@ -1068,6 +1101,10 @@ export const api = {
   marketSnapshot: () =>
     request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
+
+  // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
+  rpsRotation: (days: number) =>
+    request<RpsRotationData>(`/api/rps/rotation?days=${days}`),
 
   limitLadder: (asOf?: string, extColumns?: string, direction?: 'up' | 'down') => {
     const params = new URLSearchParams()
@@ -1618,11 +1655,11 @@ export const api = {
 
   /** 检查 AI 配置状态 */
   strategyAiStatus: () =>
-    request<{ configured: boolean; has_key: boolean; has_model: boolean }>('/api/strategies/ai/status'),
+    request<{ configured: boolean; has_key: boolean; has_model: boolean; provider?: string }>('/api/strategies/ai/status'),
 
   /** 测试 AI 连通性 */
   strategyAiTest: () =>
-    request<{ ok: boolean; error?: string; model?: string; usage?: { prompt: number; completion: number } }>(
+    request<{ ok: boolean; error?: string; model?: string; response?: string; usage?: { prompt: number; completion: number } }>(
       '/api/strategies/ai/test',
       { method: 'POST' },
     ),
@@ -1763,6 +1800,7 @@ export interface PullConfig {
   last_status?: string | null
   last_message?: string | null
   last_rows?: number | null
+  next_run?: string | null
 }
 
 export interface ExtDataConfig {

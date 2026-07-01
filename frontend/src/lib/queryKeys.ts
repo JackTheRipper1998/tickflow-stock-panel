@@ -73,6 +73,9 @@ export const QK = {
 
   // AI 大盘复盘
   reviewReports:        ['review-reports'] as const,
+
+  // 概念涨幅轮动矩阵
+  rpsRotation:          (days: number) => ['rps-rotation', days] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====
@@ -84,5 +87,5 @@ export const SSE_INVALIDATE_PREFIXES = [
   'index-quotes',
   'overview-market',
   'limit-ladder',
-  'screener-cached',
+  'screener',
 ] as const

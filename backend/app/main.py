@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
+from app.api import analysis, auth as auth_api, backtest, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
@@ -33,6 +33,14 @@ async def lifespan(app: FastAPI):
         "TickFlow Stock Panel v%s starting (mode=%s)",
         __version__, tf_client.current_mode(),
     )
+
+    # 首次启动: 若配置了 AUTH_PASSWORD 环境变量且未设过密码, 用它初始化。
+    # 公网部署免 SSH 端口转发; 已设过密码则不覆盖 (改密码走 UI)。
+    try:
+        from app.services import auth as auth_service
+        auth_service.bootstrap_from_env()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("auth bootstrap failed: %s", e)
 
     # 数据层
     store = DataStore()
@@ -98,7 +106,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.warning("内置扩展表初始化失败 (不影响启动): %s", e)
 
-    # 财务数据独立调度 (需 Expert 套餐)
+    # 财务数据 (需 Expert 套餐): 仅初始化调度器供 /api/financials/sync/* 手动同步,
+    # 不启动自动调度——用户在「财务分析」页点「同步」手动拉取。
     from app.services.financial_sync import financial_scheduler
     financial_scheduler.start(store.data_dir, capset)
     app.state.financial_scheduler = financial_scheduler
@@ -129,6 +138,9 @@ async def lifespan(app: FastAPI):
     monitor_engine = MonitorRuleEngine()
     monitor_engine.set_strategy_engine(strategy_engine)
     monitor_engine.set_data_dir(store.data_dir)
+    # 复用 ScreenerService 的历史窗口加载器 (三级缓存, 启动预计算命中 ~0ms),
+    # 让声明 filter_history 的策略 (如反包) 也能在实时监控里跑选股 → 盘中触发通知。
+    monitor_engine.set_history_loader(_screener_svc._load_enriched_history)
 
     # 自动迁移: 把旧 strategy_monitor_ids 同步为 type=strategy 规则 (统一到监控页)
     try:
@@ -254,6 +266,7 @@ app.include_router(strategy.router)
 app.include_router(signals.router)
 app.include_router(monitor_rules.router)
 app.include_router(alerts.router)
+app.include_router(rps.router)
 
 
 # 能力门控异常 → 403(而非默认 500)
