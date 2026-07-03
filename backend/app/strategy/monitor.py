@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 import polars as pl
 
+from app.market_time import cn_today
 from app.strategy.custom_signals import _OP_BUILDERS  # type: ignore  # 复用运算符构造器
 from app.strategy import config as _strategy_config
 
@@ -349,11 +350,16 @@ class MonitorRuleEngine:
 
     # ── 规则管理 ───────────────────────────────────────
     def set_rules(self, rules: list[dict]) -> None:
-        """批量设置规则 (覆盖)。用于启动时 reload。"""
-        self._rules = {}
+        """批量设置规则 (覆盖)。用于启动时 reload。
+
+        先构建完整 dict 再原子替换 self._rules, 避免评估线程 (行情轮询)
+        读到装载了一半的规则表。
+        """
+        new_rules: dict[str, dict] = {}
         for r in rules:
             if r.get("enabled") is not False:
-                self._rules[r["id"]] = r
+                new_rules[r["id"]] = r
+        self._rules = new_rules
         logger.info("MonitorRuleEngine: 装载 %d 条规则", len(self._rules))
 
     def add_rule(self, rule: dict) -> None:
@@ -364,8 +370,8 @@ class MonitorRuleEngine:
 
     def remove_rule(self, rule_id: str) -> None:
         self._rules.pop(rule_id, None)
-        # 清理对应的 cooldown 记录
-        self._last_fire = {k: v for k, v in self._last_fire.items() if k[0] != rule_id}
+        # 清理对应的 cooldown 记录 (list 快照: 评估线程可能并发写 _last_fire)
+        self._last_fire = {k: v for k, v in list(self._last_fire.items()) if k[0] != rule_id}
 
     def clear(self) -> None:
         self._rules.clear()
@@ -387,6 +393,16 @@ class MonitorRuleEngine:
         """
         return self._latest_strategy_results
 
+    def has_rule_type(self, rtype: str) -> bool:
+        """是否存在指定类型的 (已启用) 规则。供 quote_service 判断是否需要注入特殊数据。"""
+        if not self._rules:
+            return False
+        # list() 快照: API 线程可能并发增删规则, 直接迭代 dict 会抛 RuntimeError
+        return any(
+            r.get("enabled", True) and r.get("type") == rtype
+            for r in list(self._rules.values())
+        )
+
     # ── 评估 ───────────────────────────────────────────
     def evaluate(self, df: pl.DataFrame) -> list[dict]:
         """行情更新后评估所有规则。
@@ -404,7 +420,9 @@ class MonitorRuleEngine:
         # 每轮重置: 只保留本次 evaluate 产出的策略结果
         self._latest_strategy_results = {}
 
-        for rule_id, rule in self._rules.items():
+        # list() 快照: 本方法跑在行情轮询线程, API 线程同时 add/remove 规则
+        # 会触发 "dictionary changed size during iteration", 整轮告警丢失
+        for rule_id, rule in list(self._rules.items()):
             try:
                 events.extend(self._evaluate_rule(df, rule, now))
             except Exception as e:
@@ -427,6 +445,9 @@ class MonitorRuleEngine:
         if rtype == "strategy":
             # 策略类型: 跑策略选股 → 对比上期选股池 → 产出 new_entry/dropped 事件
             hit_rows = self._match_strategy(scoped, rule)
+        elif rtype == "ladder":
+            # 连板梯队封单监控: 独立处理 (需带预警封单值, 走专属 message)
+            return self._evaluate_ladder(scoped, rule, now)
         else:
             # signal / price / market: 通用条件匹配
             for sym, name, price, pct, hit_sigs in self._match_conditions(scoped, rule):
@@ -543,7 +564,7 @@ class MonitorRuleEngine:
         # 现接入 history_loader, 拼历史窗口 + 今日实时行情, 经 precomputed_history 喂给引擎。
         # loader 为 None (未装配) 时退回跳过, 保持旧行为, 不破坏无历史场景。
         run_kwargs: dict = {
-            "as_of": _dt.date.today(),
+            "as_of": cn_today(),
             "overrides": overrides,
         }
         if s.filter_history_fn:
@@ -551,7 +572,7 @@ class MonitorRuleEngine:
                 logger.debug("策略 %s 需要历史数据但未注入 history_loader, 跳过实时监控", sid)
                 return []
             try:
-                today = _dt.date.today()
+                today = cn_today()
                 lookback = max(1, getattr(s, "lookback_days", 30))
                 hist_df = self._history_loader(today, lookback)
                 if hist_df is None or hist_df.is_empty():
@@ -585,7 +606,7 @@ class MonitorRuleEngine:
             import math
             self._latest_strategy_results[sid] = {
                 "total": result.total,
-                "as_of": str(_dt.date.today()),
+                "as_of": str(cn_today()),
                 "rows": [
                     {k: (None if isinstance(v, float) and not math.isfinite(v) else v)
                      for k, v in row.items()}
@@ -689,6 +710,85 @@ class MonitorRuleEngine:
             ]
             results.append((sym, name, price, pct, hit_sigs))
         return results
+
+    def _evaluate_ladder(self, scoped: pl.DataFrame, rule: dict, now: float) -> list[dict]:
+        """评估连板梯队封单监控规则。
+
+        封单量从注入的临时列 _sealed_vol (手) 读取 (由 quote_service 评估前注入)。
+        命中条件: 封单比较值 <= threshold (且封单 > 0, 排除无 depth 数据的股票)。
+        涨停(direction=up) → 炸板预警; 跌停(direction=down) → 翘板预警。
+        """
+        if "_sealed_vol" not in scoped.columns:
+            return []  # 无封单数据 (depth 未拉取), 安全降级
+
+        metric = rule.get("metric", "sealed_vol")
+        threshold = rule.get("threshold", 0)
+        direction = rule.get("direction", "up")
+        cooldown = rule.get("cooldown_seconds", 600)
+        severity = rule.get("severity", "warn")
+
+        # 比较值: sealed_vol 直接用 (手), sealed_amount = 手 × 100股 × close
+        if metric == "sealed_amount":
+            cmp_expr = pl.col("_sealed_vol") * 100 * pl.col("close")
+            unit = "元"
+        else:
+            cmp_expr = pl.col("_sealed_vol")
+            unit = "手"
+
+        # 命中: 封单 > 0 (有数据) 且 比较值 <= 阈值
+        hit = scoped.filter(
+            pl.col("_sealed_vol").is_not_null()
+            & (pl.col("_sealed_vol") > 0)
+            & (cmp_expr <= threshold)
+        )
+        if hit.is_empty():
+            return []
+
+        warn_label = "炸板预警" if direction == "up" else "翘板预警"
+        events: list[dict] = []
+        for row in hit.iter_rows(named=True):
+            sym = row.get("symbol", "")
+            key = (rule["id"], sym)
+            last = self._last_fire.get(key)
+            if last is not None and (now - last) < cooldown:
+                continue
+            self._last_fire[key] = now
+
+            name = row.get("name") or self._name_map.get(sym) or sym
+            price = row.get("close")
+            pct = row.get("change_pct")
+            sealed_vol = row.get("_sealed_vol")
+            # 预警封单值 (展示用)
+            sealed_value = sealed_vol * 100 * (price or 0) if metric == "sealed_amount" else sealed_vol
+
+            # message 体现预警封单量 + 阈值
+            if metric == "sealed_amount":
+                sv_text = f"{sealed_value / 1e4:.0f}万{unit}"
+                th_text = f"{threshold / 1e4:.0f}万{unit}"
+            else:
+                sv_text = f"{sealed_value:,.0f} {unit}"
+                th_text = f"{threshold:,.0f} {unit}"
+            message = f"{warn_label} · 封单 {sv_text} ≤ {th_text}"
+
+            events.append({
+                "ts": int(now * 1000),
+                "rule_id": rule["id"],
+                "rule_name": rule.get("name", ""),
+                "source": "ladder",
+                "type": warn_label,
+                "symbol": sym,
+                "name": name,
+                "message": message,
+                "price": price,
+                "change_pct": pct,
+                "signals": [],
+                "severity": severity,
+                "conditions": [],
+                "logic": "and",
+                "sealed_value": sealed_value,   # 预警封单量/额 (飞书+记录展示)
+                "sealed_metric": metric,
+            })
+        return events
 
     def _default_message(self, rule: dict, ev_type: str = "", sym: str = "",
                           name: str = "", pct: Any = None, price: Any = None,
