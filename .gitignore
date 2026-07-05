@@ -105,3 +105,6 @@ packaging/installed_run.log
 TickFlowStockPanel.app/
 TickFlowStockPanel-macos*.dmg
 TickFlowStockPanel-macos*.zip
+
+# 本地数据打包(勿入库)
+data.zip

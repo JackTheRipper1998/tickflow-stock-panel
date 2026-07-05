@@ -316,13 +316,25 @@ def get_cached(
 
 
 @router.get("/market-snapshot")
-def market_snapshot(request: Request):
-    """最新全市场轻量行情快照，供板块/概念聚合分析使用。"""
+def market_snapshot(request: Request, as_of: Optional[str] = None):
+    """全市场轻量行情快照，供板块/概念聚合分析使用。
+
+    as_of: 可选 YYYY-MM-DD。指定则返回该历史交易日的快照(含当日 change_pct),
+           不指定则返回最新交易日。用于自选页/概念面板按历史日期回看。
+    """
+    from datetime import date as date_type
+
     import polars as pl
 
     repo = request.app.state.repo
     svc = ScreenerService(repo)
-    as_of = svc.latest_date()
+    if as_of:
+        try:
+            as_of = date_type.fromisoformat(as_of)
+        except ValueError:
+            as_of = svc.latest_date()
+    else:
+        as_of = svc.latest_date()
     if not as_of:
         return {"as_of": None, "rows": []}
 
@@ -348,6 +360,20 @@ def market_snapshot(request: Request):
                 r[k] = None
 
     return {"as_of": str(as_of), "rows": rows}
+
+
+@router.get("/market-dates")
+def market_dates(request: Request):
+    """可回看的交易日列表(升序), 来自 enriched 分区目录。供自选页日期选择器使用。"""
+    repo = request.app.state.repo
+    enriched_dir = repo.store.data_dir / "kline_daily_enriched"
+    dates: list[str] = []
+    if enriched_dir.exists():
+        for d in enriched_dir.iterdir():
+            if d.is_dir() and d.name.startswith("date="):
+                dates.append(d.name[5:])
+    dates.sort()
+    return {"dates": dates}
 
 
 @router.post("/run_all")

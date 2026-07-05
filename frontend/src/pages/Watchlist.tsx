@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp } from 'lucide-react'
+import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, CalendarDays } from 'lucide-react'
 import { api, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
@@ -25,6 +25,7 @@ import {
   saveColumnConfig,
   buildExtColumnsParam,
 } from '@/lib/watchlist-columns'
+import { WatchlistConceptPanel, useWatchlistConcepts } from '@/components/WatchlistConceptPanel'
 
 // ===== 板块标识（筛选/卡片用） =====
 // 注: boardTag（创/科/北 标签）已移至共享 @/components/stock-table/primitives
@@ -645,7 +646,40 @@ export function Watchlist() {
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null)
 
   const allSymbols = list.data?.symbols?.map(s => s.symbol) ?? []
-  const rows = enriched.data?.rows ?? []
+  const liveRows = enriched.data?.rows ?? []
+
+  // ── 历史回看: 选一个交易日, 表格涨幅 + 概念面板数值都切到那天 ──
+  // asOf 为 null = 实时/最新(默认)。
+  const [asOf, setAsOf] = useState<string | null>(null)
+  const datesQuery = useQuery({
+    queryKey: ['market-dates'],
+    queryFn: api.marketDates,
+    staleTime: 60 * 60_000,
+  })
+  const availableDates = datesQuery.data?.dates ?? []
+  const datedSnap = useQuery({
+    queryKey: QK.marketSnapshot(asOf ?? undefined),
+    queryFn: () => api.marketSnapshot(asOf ?? undefined),
+    enabled: !!asOf,
+    staleTime: 5 * 60_000,
+  })
+  // symbol → 当日全市场快照行(含 change_pct/close/turnover 等)
+  const datedMap = useMemo(() => {
+    const m = new Map<string, any>()
+    for (const r of (datedSnap.data?.rows ?? []) as any[]) {
+      if (r.symbol) m.set(String(r.symbol), r)
+    }
+    return m
+  }, [datedSnap.data])
+  // 回看模式下, 用当日快照覆盖每行的价格/涨幅等字段(其余如日K蜡烛仍为实时)
+  const rows = useMemo(() => {
+    if (!asOf) return liveRows
+    return (liveRows as any[]).map(r => {
+      const d = datedMap.get(String(r.symbol))
+      if (!d) return { ...r, rt_pct: null, change_pct: null, rt_price: null, close: null }
+      return { ...r, ...d, rt_pct: d.change_pct ?? null, rt_price: d.close ?? null }
+    })
+  }, [asOf, liveRows, datedMap])
 
   // 实时监控圆点: 仅 Free/低档 "按自选股实时监控" 模式 (mode === 'watchlist') 下显示;
   // Starter+ 全市场模式 (mode === 'full_market') 全部标的都在监控, 标圆点无意义, 故不显示。
@@ -684,6 +718,25 @@ export function Watchlist() {
       return next
     })
   }, [persistBoardFilter])
+
+  // 概念透视: 全市场 symbol→概念 映射(与概念分析页共享缓存) + 概念筛选状态
+  const [conceptSource, setConceptSource] = useState<'kpl' | 'ths'>(() => storage.watchlistConceptSource.get('kpl'))
+  const { query: conceptQuery, symbolConcepts } = useWatchlistConcepts(conceptSource)
+  const [conceptFilter, setConceptFilter] = useState<Set<string>>(new Set())
+  const changeConceptSource = useCallback((s: 'kpl' | 'ths') => {
+    storage.watchlistConceptSource.set(s)
+    setConceptSource(s)
+    setConceptFilter(new Set())  // 换源后旧概念名不再适用, 清空筛选
+  }, [])
+  const toggleConcept = useCallback((c: string) => {
+    setConceptFilter(prev => {
+      const next = new Set(prev)
+      if (next.has(c)) next.delete(c)
+      else next.add(c)
+      return next
+    })
+  }, [])
+  const clearConceptFilter = useCallback(() => setConceptFilter(new Set()), [])
 
   const updateFilter = useCallback((colId: string, patch: { min?: string; max?: string; text?: string }) => {
     setFilters(prev => {
@@ -730,6 +783,15 @@ export function Watchlist() {
         return board != null && boardFilter.has(board)
       })
     }
+    // 概念筛选(概念透视面板联动, 多选为"命中任一")
+    if (conceptFilter.size > 0) {
+      result = result.filter(r => {
+        const concepts = symbolConcepts.get(r.symbol)
+        if (!concepts?.length) return false
+        for (const c of concepts) if (conceptFilter.has(c)) return true
+        return false
+      })
+    }
     // 数值/文本筛选
     const activeFilters = Object.entries(filters).filter(([, v]) => v.min || v.max || v.text)
     if (activeFilters.length > 0) {
@@ -750,7 +812,7 @@ export function Watchlist() {
       })
     }
     return result
-  }, [rows, filters, columns, boardFilter])
+  }, [rows, filters, columns, boardFilter, conceptFilter, symbolConcepts])
 
   const activeFilterCount = Object.values(filters).filter(v => v.min || v.max || v.text).length
 
@@ -824,6 +886,27 @@ export function Watchlist() {
             >
               {viewMode === 'table' ? <LayoutGrid className="h-4 w-4" /> : <List className="h-4 w-4" />}
             </button>
+            <div className="w-px h-5 bg-border" />
+            {/* 历史回看日期: 选交易日看当日涨幅 + 概念数值, 留空=实时 */}
+            <div className={`inline-flex items-center gap-1 h-8 pl-1.5 pr-1 rounded-btn ${asOf ? 'bg-accent/15 text-accent' : 'bg-elevated text-secondary'}`}>
+              <CalendarDays className="h-4 w-4 shrink-0" />
+              <input
+                type="date"
+                value={asOf ?? ''}
+                min={availableDates[0]}
+                max={availableDates[availableDates.length - 1]}
+                onChange={e => setAsOf(e.target.value || null)}
+                className="h-7 bg-transparent text-xs outline-none w-[7.5rem] [color-scheme:light] dark:[color-scheme:dark]"
+                title="选择交易日回看当日涨幅与概念数值; 留空=实时"
+              />
+              {asOf
+                ? (
+                  <button onClick={() => setAsOf(null)} title="回到实时" className="inline-flex items-center justify-center h-6 w-6 rounded hover:bg-warning/20 text-warning">
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )
+                : <span className="text-[10px] text-muted pr-1">实时</span>}
+            </div>
             <div className="w-px h-5 bg-border" />
             {/* 自定义列 / 刷新 */}
             <button
@@ -928,6 +1011,20 @@ export function Watchlist() {
           )}
         </div>
       )}
+
+      {/* 概念透视面板(折叠) */}
+      <WatchlistConceptPanel
+        rows={rows}
+        symbolConcepts={symbolConcepts}
+        conceptsLoading={conceptQuery.isLoading}
+        selected={conceptFilter}
+        onToggle={toggleConcept}
+        onClear={clearConceptFilter}
+        onPreview={(sym, name) => { setPreviewSymbol(sym); setPreviewName(name) }}
+        source={conceptSource}
+        onSourceChange={changeConceptSource}
+        asOf={asOf}
+      />
 
       {/* 可滚动列表区 — 占满剩余高度，内部独立滚动，表头 sticky 固定 */}
       <div className="flex-1 min-h-0 overflow-y-auto">

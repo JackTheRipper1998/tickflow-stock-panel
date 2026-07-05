@@ -1108,8 +1108,12 @@ export const api = {
         ? `/api/screener/cached?ext_columns=${encodeURIComponent(extColumns)}`
         : '/api/screener/cached',
     ),
-  marketSnapshot: () =>
-    request<{ as_of: string | null; rows: MarketSnapshotRow[] }>('/api/screener/market-snapshot'),
+  marketSnapshot: (asOf?: string) =>
+    request<{ as_of: string | null; rows: MarketSnapshotRow[] }>(
+      `/api/screener/market-snapshot${asOf ? `?as_of=${asOf}` : ''}`,
+    ),
+  marketDates: () =>
+    request<{ dates: string[] }>('/api/screener/market-dates'),
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序

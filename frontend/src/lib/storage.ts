@@ -48,6 +48,15 @@ export const storage = {
   /** 自选列表板块筛选 */
   watchlistBoardFilter: kv<string[]>('watchlist_boardFilter'),
 
+  /** 自选概念透视面板展开状态 */
+  watchlistConceptPanel: kv<boolean>('watchlist_conceptPanel'),
+
+  /** 自选概念透视是否显示泛概念(融资融券/次新股等) */
+  watchlistConceptShowGeneric: kv<boolean>('watchlist_conceptShowGeneric'),
+
+  /** 自选概念透视数据源: kpl=开盘啦题材 | ths=同花顺概念 */
+  watchlistConceptSource: kv<'kpl' | 'ths'>('watchlist_conceptSource'),
+
   /** Screener 卡片尺寸 */
   screenerCardSize:     kv<string>('screener-card-size'),
 
