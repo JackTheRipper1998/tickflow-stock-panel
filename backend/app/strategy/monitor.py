@@ -56,6 +56,13 @@ _SIGNAL_CN: dict[str, str] = {
     "momentum_5d": "5日动量", "momentum_20d": "20日动量", "momentum_60d": "60日动量",
     "atr_14": "ATR14", "annual_vol_20d": "20日年化波动",
     "consecutive_limit_ups": "连板数", "consecutive_limit_downs": "跌停连板",
+    "opening_vol_ratio_5d": "开盘抢筹强度(5分钟量/5日均量)",
+    # 集合竞价强弱
+    "gap_pct": "开盘涨幅", "gap_type": "涨幅类型",
+    "auction_vol_ratio": "集合竞价量/前日全天量", "volume_type": "成交量类型",
+    "signal_auction_safe_high_open": "高开放量(相对安全)",
+    "signal_auction_distribution_risk": "高开放量(疑似出货)",
+    "signal_auction_bottom_reversal": "大低开放量(强做多信号)",
 }
 
 

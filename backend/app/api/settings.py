@@ -539,7 +539,7 @@ def update_realtime_monitor_config(req: RealtimeMonitorConfigIn, request: Reques
             try:
                 if preferences.get_strategy_monitor_enabled():
                     ids = preferences.get_strategy_monitor_ids()
-                    names = {s.id: s.name for s in strategy_engine.list_strategies()}
+                    names = {s["id"]: s["name"] for s in strategy_engine.list_strategies()}
                     mr_store.migrate_strategy_monitors(data_dir, ids, names)
                 else:
                     # 关闭策略监控: 停用所有策略规则

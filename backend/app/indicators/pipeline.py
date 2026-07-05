@@ -134,6 +134,16 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "rsi_6":                   "6日相对强弱指标",
     "rsi_14":                  "14日相对强弱指标",
     "rsi_24":                  "24日相对强弱指标",
+    # ── 开盘抢筹强度 (盘中实时注入, 见 opening_surge_service) ──
+    "opening_vol_ratio_5d":    "开盘5分钟成交量 / 自身过去5日同时段均量 (09:36后才有值)",
+    # ── 集合竞价强弱 (盘中实时注入, 见 auction_strength_service) ──
+    "gap_pct":                 "开盘涨幅 (开盘价/昨收-1)",
+    "gap_type":                "涨幅类型: 大高开/小高开/高开/平开/低开/小低开/大低开",
+    "auction_vol_ratio":       "集合竞价成交量 / 前一交易日全天成交量 (09:26快照后才有值)",
+    "volume_type":             "成交量类型: 极致缩量/缩量/标准量/放量/巨量 (09:26快照后才有值)",
+    "signal_auction_safe_high_open": "高开5%~8%且竞价放量1.2%~3% (相对安全, 数据标定)",
+    "signal_auction_distribution_risk": "高开>5%且竞价放量≥5% (疑似出货, 数据标定)",
+    "signal_auction_bottom_reversal": "大低开(<-5%)且竞价放量5%~10% (博反弹, 未验证)",
     # ── 信号列 (bool) ────────────────────────────────────
     "signal_ma_golden_5_20":   "MA5上穿MA20 (金叉)",
     "signal_ma_dead_5_20":     "MA5下穿MA20 (死叉)",
@@ -172,6 +182,8 @@ ENRICHED_COLUMNS_BY_CATEGORY: dict[str, list[str]] = {
     "momentum": ["momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d"],
     "volatility": ["annual_vol_20d"],
     "rsi":      ["rsi_6", "rsi_14", "rsi_24"],
+    "opening_surge": ["opening_vol_ratio_5d"],
+    "auction_strength": ["gap_pct", "gap_type", "auction_vol_ratio", "volume_type"],
     "signals":  [k for k in ENRICHED_COLUMNS if k.startswith("signal_")],
     "join":     ["name", "total_shares", "float_shares"],
 }

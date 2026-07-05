@@ -69,6 +69,17 @@ async def lifespan(app: FastAPI):
     app.state.strategy_monitor = strategy_monitor
     qs.set_app_state(app.state)
 
+    # 开盘抢筹强度服务(开盘5分钟量 vs 自身过去5日同时段均量, 09:36 定时快照)
+    from app.services.opening_surge_service import opening_surge_service
+    opening_surge_service.set_repo(repo)
+    app.state.opening_surge_service = opening_surge_service
+
+    # 集合竞价强弱服务(开盘涨幅类型 + 集合竞价量 vs 前一日全天量;
+    # 竞价量来自 09:26 盘前快照 / 09:32 分钟K校正, 见服务文件头实测说明)
+    from app.services.auction_strength_service import auction_strength_service
+    auction_strength_service.set_repo(repo)
+    app.state.auction_strength_service = auction_strength_service
+
     # 五档盘口 sealed 服务(真假涨停/跌停, 独立旁路线)
     from app.services.depth_service import DepthService
     depth_service = DepthService()
@@ -147,7 +158,7 @@ async def lifespan(app: FastAPI):
         if preferences.get_strategy_monitor_enabled():
             ids = preferences.get_strategy_monitor_ids()
             if ids:
-                names = {s.id: s.name for s in strategy_engine.list_strategies()}
+                names = {s["id"]: s["name"] for s in strategy_engine.list_strategies()}
                 mr_store.migrate_strategy_monitors(store.data_dir, ids, names)
                 logger.info("strategy monitor migrated: %d strategies", len(ids))
     except Exception as e:  # noqa: BLE001

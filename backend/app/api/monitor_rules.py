@@ -469,7 +469,8 @@ def trigger_ladder(request: Request):
     except Exception as e:  # noqa: BLE001
         pass  # 落盘失败不阻断推送
 
-    # 2. SSE 推送 (入 pending_alerts 队列)
+    # 2. SSE 广播 (走当前订阅者模型; 原来的 _pending_alerts/_alert_event 已不存在,
+    #    QuoteService 重构成每连接一个 QuoteSubscriber 后这里一直静默失败, 顺手修掉)
     if quote_svc:
         sse_alerts = [{
             "source": ev["source"], "type": ev["type"], "rule_id": ev["rule_id"],
@@ -479,9 +480,7 @@ def trigger_ladder(request: Request):
             "conditions": ev["conditions"], "logic": ev["logic"],
         } for ev in rule_events]
         try:
-            with quote_svc._lock:
-                quote_svc._pending_alerts.extend(sse_alerts)
-            quote_svc._alert_event.set()
+            quote_svc._broadcast_alerts(sse_alerts)
         except Exception:  # noqa: BLE001
             pass
 
@@ -494,6 +493,236 @@ def trigger_ladder(request: Request):
 
     return {
         "ok": True,
+        "triggered": len(rule_events),
+        "events": [{"symbol": ev["symbol"], "name": ev["name"], "message": ev["message"]} for ev in rule_events],
+    }
+
+
+@router.post("/trigger-strategy")
+def trigger_strategy(request: Request, rule_id: str, limit: int = 5):
+    """真实触发一次 type=strategy 规则的 new_entry 提醒(落盘 + SSE + 飞书), 供调试验证。
+
+    正常情况下 new_entry 只在"候选池比上一轮多出的股票"时才触发, 服务器刚重启/
+    当天首次评估没有基线可比, 不产生任何事件, 没法直接验证推送链路通不通。
+    本端点绕过 diff 逻辑, 直接把当前候选池的前 N 只当作 new_entry 手动推一遍,
+    让用户能立刻看到真实的提醒长什么样。
+    """
+    import time
+    from app.services import alert_store
+
+    repo = request.app.state.repo
+    engine = getattr(request.app.state, "monitor_engine", None)
+    strategy_engine = getattr(request.app.state, "strategy_engine", None)
+    quote_svc = getattr(request.app.state, "quote_service", None)
+
+    if not engine:
+        raise HTTPException(status_code=503, detail="监控引擎未初始化")
+    rule = engine.rules.get(rule_id)
+    if not rule or rule.get("type") != "strategy":
+        raise HTTPException(status_code=400, detail=f"规则不存在或不是 strategy 类型: {rule_id}")
+    sid = rule.get("strategy_id")
+    if not sid or not strategy_engine:
+        raise HTTPException(status_code=400, detail="规则未绑定策略, 或策略引擎未初始化")
+
+    from app.market_time import cn_today
+    from app.strategy import config as strategy_config
+    from app.services.screener import ScreenerService
+
+    overrides = {}
+    try:
+        overrides = strategy_config.load_override(repo.store.data_dir, sid)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 优先用"今天"(实时数据), 今天还没数据(如新交易日盘后管道未跑)时退回最近一个
+    # 有数据的交易日 —— 这只是测试端点, 目的是验证推送链路, 不强求必须是当天。
+    as_of = cn_today()
+    try:
+        result = strategy_engine.run(sid, as_of, overrides=overrides or None)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"策略执行失败: {e}") from e
+    if not result.rows:
+        try:
+            latest = ScreenerService(repo).latest_date()
+        except Exception:  # noqa: BLE001
+            latest = None
+        if latest and latest != as_of:
+            as_of = latest
+            try:
+                result = strategy_engine.run(sid, as_of, overrides=overrides or None)
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=500, detail=f"策略执行失败: {e}") from e
+    if not result.rows:
+        raise HTTPException(status_code=400, detail="策略当前候选池为空, 无法构造测试提醒")
+
+    sname = sid
+    try:
+        s = strategy_engine.get(sid)
+        sname = s.meta.get("name", "") or sid
+    except Exception:  # noqa: BLE001
+        pass
+
+    now = time.time()
+    rows = result.rows[: max(1, limit)]
+    rule_events: list[dict] = []
+    for row in rows:
+        pct = row.get("change_pct")
+        pct_text = f" {'+' if (pct or 0) >= 0 else ''}{pct * 100:.1f}%" if pct is not None else ""
+        rule_events.append({
+            "ts": int(now * 1000),
+            "rule_id": rule["id"],
+            "rule_name": rule.get("name", ""),
+            "source": "strategy",
+            "type": "new_entry",
+            "symbol": row.get("symbol", ""),
+            "name": row.get("name") or row.get("symbol", ""),
+            "message": f"[测试] 策略「{sname}」进入 {row.get('name') or row.get('symbol')}{pct_text}",
+            "price": row.get("close"),
+            "change_pct": pct,
+            "signals": [],
+            "severity": rule.get("severity", "info"),
+            "conditions": [],
+            "logic": "and",
+        })
+
+    # 1. 落盘到 alerts.jsonl
+    try:
+        alert_store.append_many(repo.store.data_dir, rule_events)
+    except Exception:  # noqa: BLE001
+        pass  # 落盘失败不阻断推送
+
+    # 2. SSE 广播
+    if quote_svc:
+        sse_alerts = [{
+            "source": ev["source"], "type": ev["type"], "rule_id": ev["rule_id"],
+            "strategy_id": sid, "symbol": ev["symbol"], "name": ev["name"],
+            "message": ev["message"], "price": ev["price"], "change_pct": ev["change_pct"],
+            "signals": ev["signals"], "severity": ev["severity"],
+            "conditions": ev["conditions"], "logic": ev["logic"],
+        } for ev in rule_events]
+        try:
+            quote_svc._broadcast_alerts(sse_alerts)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 3. 飞书推送 (仅当该规则 webhook_enabled=True)
+    if quote_svc:
+        try:
+            quote_svc._maybe_send_webhook(rule_events, engine)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return {
+        "ok": True,
+        "as_of": str(result.as_of),
+        "triggered": len(rule_events),
+        "events": [{"symbol": ev["symbol"], "name": ev["name"], "message": ev["message"]} for ev in rule_events],
+    }
+
+
+@router.post("/trigger-strategy")
+def trigger_strategy(request: Request, rule_id: str, limit: int = 3):
+    """真实触发一次 type=strategy 规则的 new_entry 预警(落盘 + SSE + 飞书), 供 Dev 调试。
+
+    正常情况下 type=strategy 规则只在"新股票进入候选池"时才触发, 首次评估只记录
+    基线不产生事件, 导致没法手动测试。本端点绕过 diff 逻辑, 直接把当前候选池的
+    前 limit 只当成"新入选"手动构造真实事件推送一遍, 让用户看到通知长什么样。
+    不影响引擎的 _strategy_pools 基线状态(不会导致下一轮真实评估重复触发同一批)。
+    """
+    import time
+    from app.services import alert_store
+
+    repo = request.app.state.repo
+    engine = getattr(request.app.state, "monitor_engine", None)
+    strategy_engine = getattr(request.app.state, "strategy_engine", None)
+    quote_svc = getattr(request.app.state, "quote_service", None)
+
+    if not engine or not strategy_engine:
+        raise HTTPException(status_code=503, detail="监控引擎或策略引擎未初始化")
+
+    rule = engine.rules.get(rule_id)
+    if not rule or rule.get("type") != "strategy":
+        raise HTTPException(status_code=400, detail=f"未找到 type=strategy 的规则: {rule_id}")
+
+    sid = rule.get("strategy_id")
+    if not sid:
+        raise HTTPException(status_code=400, detail="规则未绑定 strategy_id")
+
+    from app.market_time import cn_today
+    from app.strategy import config as strategy_config
+
+    overrides = {}
+    try:
+        overrides = strategy_config.load_override(repo.store.data_dir, sid)
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        result = strategy_engine.run(sid, cn_today(), overrides=overrides or None)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"策略执行失败: {e}") from e
+
+    if not result.rows:
+        raise HTTPException(status_code=400, detail="当前候选池为空, 无法构造测试事件(换个时间/策略再试)")
+
+    sname = rule.get("name", "") or sid
+    now = time.time()
+    rule_events: list[dict] = []
+    for row in result.rows[:max(1, limit)]:
+        sym = row.get("symbol", "")
+        name = row.get("name") or sym
+        pct = row.get("change_pct")
+        pct_text = ""
+        if pct is not None:
+            sign = "+" if pct >= 0 else ""
+            pct_text = f" {sign}{pct * 100:.1f}%"
+        rule_events.append({
+            "ts": int(now * 1000),
+            "rule_id": rule["id"],
+            "rule_name": rule.get("name", ""),
+            "source": "strategy",
+            "type": "new_entry",
+            "symbol": sym,
+            "name": name,
+            "message": f"[测试] 策略「{sname}」进入 {name}{pct_text}",
+            "price": row.get("close"),
+            "change_pct": pct,
+            "signals": [],
+            "severity": rule.get("severity", "info"),
+            "conditions": [],
+            "logic": "and",
+        })
+
+    # 1. 落盘到 alerts.jsonl
+    try:
+        alert_store.append_many(repo.store.data_dir, rule_events)
+    except Exception:  # noqa: BLE001
+        pass  # 落盘失败不阻断推送
+
+    # 2. SSE 推送: 走当前真实的按订阅者广播机制 (QuoteService._broadcast_alerts),
+    #    不是已废弃的 _pending_alerts/_alert_event (trigger-ladder 那个端点还在用旧的, 已失效)
+    if quote_svc:
+        sse_alerts = [{
+            "source": ev["source"], "type": ev["type"], "rule_id": ev["rule_id"],
+            "strategy_id": sid, "symbol": ev["symbol"], "name": ev["name"],
+            "message": ev["message"], "price": ev["price"], "change_pct": ev["change_pct"],
+            "signals": ev["signals"], "severity": ev["severity"],
+            "conditions": ev["conditions"], "logic": ev["logic"],
+        } for ev in rule_events]
+        try:
+            quote_svc._broadcast_alerts(sse_alerts)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 3. 飞书推送 (仅当该规则 webhook_enabled=True)
+    try:
+        quote_svc._maybe_send_webhook(rule_events, engine) if quote_svc else None
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "ok": True,
+        "as_of": str(result.as_of),
         "triggered": len(rule_events),
         "events": [{"symbol": ev["symbol"], "name": ev["name"], "message": ev["message"]} for ev in rule_events],
     }

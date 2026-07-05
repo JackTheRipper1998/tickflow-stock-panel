@@ -51,6 +51,11 @@ ALLOWED_FIELDS: frozenset[str] = frozenset({
     "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
     "annual_vol_20d",
     "rsi_6", "rsi_14", "rsi_24",
+    # 开盘抢筹强度 (盘中 09:36 后才有值, 见 opening_surge_service)
+    "opening_vol_ratio_5d",
+    # 集合竞价强弱 (盘中实时, 见 auction_strength_service; gap_pct 随时可用,
+    # auction_vol_ratio 09:35 后才有值)
+    "gap_pct", "auction_vol_ratio",
 })
 
 # 运算符 → Polars 表达式构造器（输入 col_expr, value）

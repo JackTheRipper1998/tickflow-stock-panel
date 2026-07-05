@@ -1009,6 +1009,38 @@ class QuoteService:
             if enriched_today.is_empty():
                 return
 
+            # ---- 注入开盘抢筹强度 (opening_vol_ratio_5d): 09:36快照过才有值,
+            # 未快照(如09:36前/行情服务当天才开启)时 get_ratio_map 返回空, 静默跳过 ----
+            if asset_type == "stock":
+                try:
+                    from app.services.opening_surge_service import opening_surge_service
+                    ratio_map = opening_surge_service.get_ratio_map(today)
+                    if ratio_map:
+                        ratio_df = pl.DataFrame({
+                            "symbol": list(ratio_map.keys()),
+                            "opening_vol_ratio_5d": list(ratio_map.values()),
+                        })
+                        enriched_today = enriched_today.join(ratio_df, on="symbol", how="left")
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("开盘抢筹强度注入失败(不影响主流程): %s", e)
+
+            # ---- 注入集合竞价强弱(gap_pct/gap_type 随时可用; auction_vol_ratio/volume_type
+            # 09:26盘前快照/09:32分钟K校正后才有值, 见 auction_strength_service) ----
+            if asset_type == "stock":
+                try:
+                    from app.services.auction_strength_service import auction_strength_service
+                    enriched_today = auction_strength_service.inject_gap_fields(enriched_today)
+                    ratio_map = auction_strength_service.get_ratio_map(today)
+                    if ratio_map:
+                        ratio_df = pl.DataFrame({
+                            "symbol": list(ratio_map.keys()),
+                            "auction_vol_ratio": list(ratio_map.values()),
+                        })
+                        enriched_today = enriched_today.join(ratio_df, on="symbol", how="left")
+                        enriched_today = auction_strength_service.inject_volume_fields(enriched_today)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("集合竞价强弱注入失败(不影响主流程): %s", e)
+
             # ---- 写盘 + 更新缓存 ----
             if merge:
                 self._repo.merge_live_enriched_asset(asset_type, enriched_today)

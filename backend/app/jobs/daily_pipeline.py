@@ -808,6 +808,50 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         replace_existing=True,
     )
 
+    # 开盘抢筹强度快照 (09:36, 开盘5分钟后): 从实时行情取当日累计成交量,
+    # 近似作为"开盘5分钟量", 落盘供 opening_vol_ratio_5d 计算用。固定时间点,
+    # 不像 pipeline/depth 那样开放偏好设置(9:36 是形态本身的定义, 不该被改)。
+    def _opening_surge_snapshot():
+        svc = getattr(_get_app_state(), "opening_surge_service", None) if _get_app_state() else None
+        if svc:
+            svc.snapshot_today()
+
+    scheduler.add_job(
+        _opening_surge_snapshot,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=9, minute=36, timezone="Asia/Shanghai"),
+        id="opening_surge_snapshot",
+        misfire_grace_time=600,
+        replace_existing=True,
+    )
+
+    # 集合竞价量快照, 两条腿(见 auction_strength_service 文件头的实测校准说明):
+    #   09:26 盘前快照 — 竞价撮合完、连续竞价未开始, 实时行情累计量 = 纯竞价量;
+    #   09:32 分钟K校正 — 拉当天09:30竞价K线(O=H=L=C那根), 精确值覆盖盘前快照。
+    def _auction_premarket_snapshot():
+        svc = getattr(_get_app_state(), "auction_strength_service", None) if _get_app_state() else None
+        if svc:
+            svc.snapshot_premarket()
+
+    def _auction_minute_k_correction():
+        svc = getattr(_get_app_state(), "auction_strength_service", None) if _get_app_state() else None
+        if svc:
+            svc.snapshot_from_minute_k()
+
+    scheduler.add_job(
+        _auction_premarket_snapshot,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=9, minute=26, timezone="Asia/Shanghai"),
+        id="auction_premarket_snapshot",
+        misfire_grace_time=180,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _auction_minute_k_correction,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=9, minute=32, timezone="Asia/Shanghai"),
+        id="auction_minute_k_correction",
+        misfire_grace_time=600,
+        replace_existing=True,
+    )
+
     # 定时复盘 (AI 大盘复盘报告): 工作日到点自动生成并归档。
     # 默认关闭 —— 仅当用户在复盘页开启时才注册 job。
     # 复用 recap_market_once(非流式) + market_recap_reports.save_report(落盘)。
