@@ -80,6 +80,8 @@ export function renderBuiltinDataCell(r: any, col: ColumnConfig): ReactNode | nu
           </span>
         </td>
       )
+    case 'net_inflow':
+      return <td key={col.id} className={`${numCls} ${priceColorClass(r.net_inflow_ratio)}`}>{r.net_inflow_ratio != null ? fmtPct(r.net_inflow_ratio, 1) : '—'}</td>
     case 'annual_vol':
       return <td key={col.id} className={numCls}>{r.annual_vol_20d != null ? fmtPct(r.annual_vol_20d) : '—'}</td>
     // 均线

@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, CalendarDays } from 'lucide-react'
+import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, CalendarDays, Zap } from 'lucide-react'
 import { api, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
@@ -605,7 +605,24 @@ export function Watchlist() {
     enabled: (list.data?.symbols.length ?? 0) > 0,
   })
 
-  const symbols = enriched.data?.rows?.map((r: any) => r.symbol) ?? []
+  // ── 策略动态: 实时模式下用"强势高位动量追涨(集合竞价强弱确认版)"实时选股替换列表 ──
+  // (不改写手动自选; 仅在实时=asOf 为空时生效; 60s 轮询重选/重排)
+  const STRATEGY_DYNAMIC_ID = 'strong_momentum_auction'
+  const [asOf, setAsOf] = useState<string | null>(null)
+  const [strategyDynamic, setStrategyDynamic] = useState<boolean>(() => storage.watchlistStrategyDynamic.get(false))
+  const inStrategyMode = strategyDynamic && !asOf
+  const strategyQuery = useQuery({
+    queryKey: ['watchlist-strategy-dynamic', STRATEGY_DYNAMIC_ID],
+    queryFn: () => api.screenerRunPreset(STRATEGY_DYNAMIC_ID),
+    enabled: inStrategyMode,
+    refetchInterval: inStrategyMode ? 60_000 : false,
+    staleTime: 30_000,
+  })
+  const strategyRows = (strategyQuery.data?.rows ?? []) as any[]
+
+  // 显示列表的标的集合 (策略动态时跟随策略选股, 否则为自选) — K线/分时据此拉取
+  const baseRows = inStrategyMode ? strategyRows : (enriched.data?.rows ?? [])
+  const symbols = (baseRows as any[]).map((r: any) => r.symbol)
   const symbolsKey = symbols.join(',')
 
   // 实时行情状态 (提前到此处: 分时轮询判断需要 realtimeRunning)
@@ -693,8 +710,7 @@ export function Watchlist() {
   const liveRows = enriched.data?.rows ?? []
 
   // ── 历史回看: 选一个交易日, 表格涨幅 + 概念面板数值都切到那天 ──
-  // asOf 为 null = 实时/最新(默认)。
-  const [asOf, setAsOf] = useState<string | null>(null)
+  // asOf 为 null = 实时/最新(默认)。asOf 状态已在上方声明(策略动态判断需先用)。
   const datesQuery = useQuery({
     queryKey: ['market-dates'],
     queryFn: api.marketDates,
@@ -715,15 +731,36 @@ export function Watchlist() {
     }
     return m
   }, [datedSnap.data])
-  // 回看模式下, 用当日快照覆盖每行的价格/涨幅等字段(其余如日K蜡烛仍为实时)
+  // 策略动态: 前一交易日同策略的选股 → 用于标注"连续入选"(昨日也被选中)
+  const prevTradingDay = availableDates.length >= 2 ? availableDates[availableDates.length - 2] : null
+  const strategyPrevQuery = useQuery({
+    queryKey: ['watchlist-strategy-dynamic-prev', STRATEGY_DYNAMIC_ID, prevTradingDay],
+    queryFn: () => api.screenerRunPreset(STRATEGY_DYNAMIC_ID, undefined, prevTradingDay!),
+    enabled: inStrategyMode && !!prevTradingDay,
+    staleTime: 30 * 60_000,  // 昨日结果不变, 缓存久一点
+  })
+  const prevSelectedSet = useMemo(
+    () => new Set(((strategyPrevQuery.data?.rows ?? []) as any[]).map(r => r.symbol)),
+    [strategyPrevQuery.data],
+  )
+
+  // 展示行: 策略动态 > 历史回看 > 实时自选。策略动态时标记: 同时在手动自选(_fromWatchlist) / 昨日也入选(_prevSelected)。
+  const watchlistSet = useMemo(() => new Set(allSymbols), [allSymbols])
   const rows = useMemo(() => {
+    if (inStrategyMode) {
+      return strategyRows.map(r => ({
+        ...r,
+        _fromWatchlist: watchlistSet.has(r.symbol),
+        _prevSelected: prevSelectedSet.has(r.symbol),
+      }))
+    }
     if (!asOf) return liveRows
     return (liveRows as any[]).map(r => {
       const d = datedMap.get(String(r.symbol))
       if (!d) return { ...r, rt_pct: null, change_pct: null, rt_price: null, close: null }
       return { ...r, ...d, rt_pct: d.change_pct ?? null, rt_price: d.close ?? null }
     })
-  }, [asOf, liveRows, datedMap])
+  }, [inStrategyMode, strategyRows, watchlistSet, prevSelectedSet, asOf, liveRows, datedMap])
 
   // 实时监控圆点: 仅 Free/低档 "按自选股实时监控" 模式 (mode === 'watchlist') 下显示;
   // Starter+ 全市场模式 (mode === 'full_market') 全部标的都在监控, 标圆点无意义, 故不显示。
@@ -949,6 +986,17 @@ export function Watchlist() {
                 )
                 : <span className="text-[10px] text-muted pr-1">实时</span>}
             </div>
+            {/* 策略动态: 实时下用策略选股替换列表(仅实时可用) */}
+            <button
+              onClick={() => { const n = !strategyDynamic; storage.watchlistStrategyDynamic.set(n); setStrategyDynamic(n) }}
+              disabled={!!asOf}
+              title={asOf ? '历史回看时不可用(仅实时)' : '策略动态: 用「强势高位动量追涨·集合竞价确认版」实时选股替换列表, 不改写手动自选'}
+              className={`inline-flex items-center gap-1 h-8 px-2 rounded-btn text-xs transition-colors duration-150 ${
+                inStrategyMode ? 'bg-accent/20 text-accent font-medium' : 'bg-elevated text-secondary hover:text-foreground'
+              } disabled:opacity-40 disabled:cursor-not-allowed`}
+            >
+              <Zap className="h-3.5 w-3.5" />策略动态
+            </button>
             <div className="w-px h-5 bg-border" />
             {/* 自定义列 / 刷新 */}
             <button
@@ -1068,6 +1116,25 @@ export function Watchlist() {
         asOf={asOf}
       />
 
+      {/* 策略动态提示条 */}
+      {inStrategyMode && (
+        <div className="mx-5 mt-1 flex items-center gap-2 rounded-md border border-accent/30 bg-accent/8 px-2.5 py-1 text-[11px] text-accent">
+          <Zap className="h-3.5 w-3.5 shrink-0" />
+          <span className="font-medium">策略动态</span>
+          <span className="text-secondary">
+            列表由「强势高位动量追涨·集合竞价确认版」实时选股驱动 · {strategyRows.length} 只 · 60s 刷新 ·
+            <Star className="inline h-3 w-3 mx-0.5 fill-current text-accent align-[-1px]" />
+            = 已在手动自选 ·
+            <span className="mx-0.5 px-1 rounded text-[9px] font-bold text-warning bg-warning/12 border border-warning/25">连</span>
+            = 昨日也入选
+          </span>
+          {strategyQuery.isFetching && <RefreshCw className="h-3 w-3 animate-spin shrink-0" />}
+          <button onClick={() => { storage.watchlistStrategyDynamic.set(false); setStrategyDynamic(false) }} className="ml-auto shrink-0 text-muted hover:text-foreground" title="退出策略动态">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* 可滚动列表区 — 占满剩余高度，内部独立滚动，表头 sticky 固定 */}
       <div className="flex-1 min-h-0 overflow-y-auto">
         <div className="px-5 py-3">
@@ -1075,12 +1142,14 @@ export function Watchlist() {
           {list.isLoading && <div className="text-sm text-muted">加载中…</div>}
           {list.isError && <div className="text-sm text-danger">读取自选失败</div>}
 
-          {allSymbols.length === 0 ? (
+          {(allSymbols.length === 0 && !inStrategyMode) ? (
             <EmptyState
               icon={Star}
               title="自选股为空"
               hint="点击右上角搜索按钮查找并预览标的，进入个股详情后可添加到自选。"
             />
+          ) : (inStrategyMode && !strategyQuery.isLoading && strategyRows.length === 0) ? (
+            <div className="py-8 text-center text-sm text-muted">策略当前无选股(可能今日无标的通过集合竞价确认)</div>
           ) : viewMode === 'table' ? (
             <StockDataTable
               columns={visibleColumns}
@@ -1167,11 +1236,35 @@ export function Watchlist() {
                               {board.label}
                             </span>
                           ) : null}
+                          {r._fromWatchlist && (
+                            <Star className="h-3 w-3 shrink-0 fill-current text-accent" aria-label="已在自选" />
+                          )}
+                          {r._prevSelected && (
+                            <span
+                              className="shrink-0 inline-flex items-center justify-center px-1 h-[15px] rounded text-[9px] font-bold leading-none text-warning bg-warning/12 border border-warning/25"
+                              title="连续入选: 昨日该策略也选中"
+                            >
+                              连
+                            </span>
+                          )}
                           {monitoredSymbols.has(r.symbol) && <span className="ml-2"><RealtimeDot /></span>}
                         </button>
                         {/* 删除入口：默认减号图标，二次确认时替换为确定按钮 */}
+                        {/* 策略动态模式下这些不是手动自选, 改为"加入自选"(已在自选的显示星标即可) */}
                         <div className="ml-auto pl-1 shrink-0">
-                          {confirmRemove === r.symbol ? (
+                          {inStrategyMode ? (
+                            r._fromWatchlist ? null : (
+                              <button
+                                onClick={() => addMutation.mutate(r.symbol)}
+                                disabled={addMutation.isPending}
+                                className="p-0.5 text-muted hover:text-accent transition-colors duration-150 ease-smooth disabled:opacity-40"
+                                aria-label="加入自选"
+                                title="加入自选"
+                              >
+                                <Plus className="h-3.5 w-3.5" />
+                              </button>
+                            )
+                          ) : confirmRemove === r.symbol ? (
                             <div className="flex items-center gap-1">
                               <button
                                 onClick={() => { remove.mutate(r.symbol); setConfirmRemove(null) }}

@@ -99,7 +99,46 @@ _WATCHLIST_COLS = [
     "signal_boll_breakout_upper", "signal_ma20_breakout",
     "signal_ma_dead_5_20", "signal_macd_dead", "signal_n_day_low",
     "signal_boll_breakdown_lower", "signal_ma20_breakdown",
+    "net_inflow_ratio",
 ]
+
+
+def _net_inflow_ratio_map(data_dir, symbols: list[str]):
+    """从今日分钟 K 估算每只票的资金净流入占比(近似, 与看板"自选概念实时"口径一致)。
+
+    每根分钟买卖压力 MFM=((收-低)-(高-收))/(高-低) × 成交额, 全天累加 ÷ 总成交额 ∈ [-1,1]。
+    正=净买入压力主导, 负=净卖出。非逐笔外盘/内盘, 是 OHLC 形态近似。
+    返回 Polars DataFrame[symbol, net_inflow_ratio] 或 None。
+    """
+    import glob
+
+    mdirs = sorted(glob.glob(str(data_dir / "kline_minute" / "date=*")))
+    if not mdirs:
+        return None
+    try:
+        m = pl.read_parquet(f"{mdirs[-1]}/part.parquet").filter(pl.col("symbol").is_in(symbols))
+    except Exception:  # noqa: BLE001
+        return None
+    if m.is_empty():
+        return None
+    m = m.with_columns(
+        pl.when(pl.col("high") > pl.col("low"))
+        .then(((pl.col("close") - pl.col("low")) - (pl.col("high") - pl.col("close")))
+              / (pl.col("high") - pl.col("low")))
+        .otherwise(0.0)
+        .alias("_mfm")
+    ).with_columns((pl.col("_mfm") * pl.col("amount")).alias("_mf"))
+    g = (
+        m.group_by("symbol")
+        .agg(pl.col("_mf").sum().alias("_net"), pl.col("amount").sum().alias("_amt"))
+        .with_columns(
+            pl.when(pl.col("_amt") > 0)
+            .then(pl.col("_net") / pl.col("_amt"))
+            .otherwise(None)
+            .alias("net_inflow_ratio")
+        )
+    )
+    return g.select(["symbol", "net_inflow_ratio"])
 
 
 @router.get("/enriched")
@@ -155,6 +194,14 @@ def watchlist_enriched(
     df = df.with_columns(
         pl.col("symbol").replace_strict(name_map, default=None, return_dtype=pl.Utf8).alias("name")
     )
+
+    # 资金净流入占比(近似): 从今日分钟 K 估算, 附到每只票
+    try:
+        inflow_df = _net_inflow_ratio_map(repo.store.data_dir, df["symbol"].to_list())
+        if inflow_df is not None:
+            df = df.join(inflow_df, on="symbol", how="left")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("net_inflow_ratio 计算跳过: %s", e)
 
     # 选择内置需要的列
     keep = [c for c in _WATCHLIST_COLS + ["name", "float_shares"] if c in df.columns]

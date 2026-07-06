@@ -35,6 +35,7 @@ export const BUILTIN_COLUMNS: ColumnConfig[] = [
   { id: 'builtin:amount', source: { type: 'builtin', key: 'amount' }, label: '成交额', visible: false, align: 'center' },
   { id: 'builtin:float_val', source: { type: 'builtin', key: 'float_val' }, label: '流通值', visible: false, align: 'center' },
   { id: 'builtin:vol_ratio', source: { type: 'builtin', key: 'vol_ratio' }, label: '量比', visible: true, align: 'center' },
+  { id: 'builtin:net_inflow', source: { type: 'builtin', key: 'net_inflow' }, label: '净流入占比', visible: false, align: 'center' },
   { id: 'builtin:annual_vol', source: { type: 'builtin', key: 'annual_vol' }, label: '年化波动', visible: false, align: 'center' },
   // 均线
   { id: 'builtin:ma5', source: { type: 'builtin', key: 'ma5' }, label: 'MA5', visible: false, align: 'center' },
@@ -87,7 +88,7 @@ export const BUILTIN_COLUMNS: ColumnConfig[] = [
 
 export const COLUMN_GROUPS: ColumnGroup[] = [
   { id: 'price', label: '价格', icon: '💰', keys: ['price', 'pct', 'change_amount', 'amplitude'] },
-  { id: 'volume', label: '成交', icon: '📊', keys: ['turnover', 'amount', 'float_val', 'vol_ratio', 'annual_vol'] },
+  { id: 'volume', label: '成交', icon: '📊', keys: ['turnover', 'amount', 'float_val', 'vol_ratio', 'net_inflow', 'annual_vol'] },
   { id: 'ma', label: '均线', icon: '📈', keys: ['ma5', 'ma10', 'ma20', 'ma60'] },
   { id: 'range', label: '区间', icon: '📏', keys: ['high_60d', 'low_60d'] },
   { id: 'tech', label: '技术指标', icon: '🔬', keys: ['rsi6', 'rsi14', 'rsi24', 'macd_dif', 'macd_dea', 'macd_hist', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_upper', 'boll_lower', 'atr14', 'vol_ma5', 'vol_ma10'] },
