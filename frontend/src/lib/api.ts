@@ -16,7 +16,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { ...init, headers })
   if (!res.ok) {
     let detail = ''
-    try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+    try {
+      const j = JSON.parse(await res.text())
+      const raw = j.detail ?? j.message ?? ''
+      if (Array.isArray(raw)) {
+        // FastAPI 422 校验错误: [{type, loc, msg, input}, ...] → 取 msg 拼接
+        detail = raw.map((e: any) => e?.msg || String(e)).join('; ')
+      } else if (typeof raw === 'string') {
+        detail = raw
+      } else if (raw && typeof raw === 'object') {
+        detail = JSON.stringify(raw)
+      }
+    } catch { /* ignore */ }
     const msg = detail || `${res.status} ${res.statusText}`
     // 401 (未登录/会话过期) 不弹 toast — 由全局认证拦截器统一跳登录页, 避免刷屏
     if (res.status !== 401) toast(msg, 'error')
@@ -675,6 +686,74 @@ export interface SaveTickflowKeyResult {
   capabilities_count?: number
 }
 
+export interface DataSourceItem {
+  name: string
+  display_name: string
+  datasets: string[]
+  path?: string | null
+}
+
+/** 内置可选插件数据源 (plugins/ 目录, 需手动装依赖) */
+export interface PluginDataSourceItem {
+  name: string
+  display_name: string
+  datasets: string[]
+  runtime: string          // node | python | none
+  available: boolean       // 依赖是否已安装
+  status: string           // 可用性原因 (供 UI 显示)
+  description: string
+  install_hint: string     // 未装依赖时显示的安装命令
+}
+
+export interface DataSourceLoadError {
+  name?: string
+  path: string
+  errors: string[]
+}
+
+export interface DataSourcesResponse {
+  builtin: DataSourceItem[]
+  plugins: PluginDataSourceItem[]
+  custom: DataSourceItem[]
+  errors: DataSourceLoadError[]
+  config_dir: string
+}
+
+export interface DataSourceTestResult {
+  provider: string
+  dataset: string
+  rows: number
+  columns: string[]
+  preview: Record<string, unknown>[]
+}
+
+export interface DatasetConfig {
+  url: string
+  method: string
+  batch?: number | null
+  rpm?: number | null
+  response_path: string
+  field_map: Record<string, string>
+  transforms?: Record<string, string>
+  symbols_param?: string
+  start_param?: string
+  end_param?: string
+}
+
+export interface AuthConfig {
+  type: string
+  token_env?: string | null
+  header?: string
+  param?: string
+}
+
+export interface CustomSourceConfig {
+  name: string
+  display_name: string
+  auth: AuthConfig
+  datasets: Record<string, DatasetConfig>
+}
+
 export interface Preferences {
   realtime_quotes_enabled: boolean
   indices_nav_pinned: boolean
@@ -684,6 +763,7 @@ export interface Preferences {
   adj_factor_provider?: string
   minute_data_provider?: string
   realtime_data_provider?: string
+  financial_data_provider?: string
   realtime_watchlist_symbols?: string[]
   realtime_pull_stock?: boolean
   realtime_pull_etf?: boolean
@@ -714,9 +794,8 @@ export interface Preferences {
   nav_order: string[]
   nav_hidden: string[]
   screener_auto_run: boolean
+  minute_intraday_refresh: boolean
 }
-
-// ===== Strategy Alert =====
 export interface StrategyAlertEvent {
   source: 'strategy' | 'depth'
   type: string
@@ -781,6 +860,40 @@ export const api = {
     request<{ ok: boolean }>('/api/settings/ai', { method: 'DELETE' }),
 
   preferences: () => request<Preferences>('/api/settings/preferences'),
+  dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
+  dataSource: (name: string) => request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`),
+  saveDataSource: (config: CustomSourceConfig) =>
+    request<DataSourcesResponse>('/api/settings/data-sources', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    }),
+  deleteDataSource: (name: string) =>
+    request<DataSourcesResponse>(`/api/settings/data-sources/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  reloadDataSources: () => request<DataSourcesResponse>('/api/settings/data-sources/reload', { method: 'POST' }),
+  installPlugin: (name: string) => {
+    // npm install 可能耗时较长, 用 6 分钟超时
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 360_000)
+    return request<DataSourcesResponse & { install_ok: boolean; install_message: string }>(
+      `/api/settings/plugins/${encodeURIComponent(name)}/install`,
+      { method: 'POST', signal: controller.signal },
+    ).finally(() => clearTimeout(timer))
+  },
+  uninstallPlugin: (name: string) =>
+    request<DataSourcesResponse & { uninstall_ok: boolean; uninstall_message: string }>(
+      `/api/settings/plugins/${encodeURIComponent(name)}/install`,
+      { method: 'DELETE' },
+    ),
+  testDataSource: (provider: string, dataset: string, symbols?: string[]) =>
+    request<DataSourceTestResult>('/api/settings/data-sources/test', {
+      method: 'POST',
+      body: JSON.stringify({ provider, dataset, symbols }),
+    }),
+  updateDataProviders: (cfg: Partial<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider' | 'financial_data_provider'>>) =>
+    request<Pick<Preferences, 'daily_data_provider' | 'adj_factor_provider' | 'minute_data_provider' | 'realtime_data_provider'>>(
+      '/api/settings/preferences/data-providers',
+      { method: 'PUT', body: JSON.stringify(cfg) },
+    ),
   updateMinuteSync: (enabled: boolean, days: number) =>
     request<Preferences>('/api/settings/preferences/minute-sync', {
       method: 'PUT',
@@ -850,6 +963,7 @@ export const api = {
     strategy_monitor_ids?: string[]
     sidebar_index_symbols?: string[]
     screener_auto_run?: boolean
+    minute_intraday_refresh?: boolean
   }) =>
     request<{
       sse_refresh_pages: Record<string, boolean>
@@ -857,6 +971,7 @@ export const api = {
       strategy_monitor_ids: string[]
       sidebar_index_symbols: string[]
       screener_auto_run: boolean
+      minute_intraday_refresh: boolean
     }>('/api/settings/preferences/realtime-monitor', {
       method: 'PUT',
       body: JSON.stringify(cfg),
@@ -977,9 +1092,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ symbols, days }),
     }),
-  instrumentSearch: (q: string, limit = 20) =>
-    request<{ results: { symbol: string; name: string; code: string }[] }>(
-      `/api/kline/instruments/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+  klineMinuteBatch: (symbols: string[], date?: string) =>
+    request<{ data: Record<string, MinuteKlineRow[]> }>('/api/kline/minute-batch', {
+      method: 'POST',
+      body: JSON.stringify({ symbols, date }),
+    }),
+  instrumentSearch: (q: string, limit = 20, assetTypes?: string) =>
+    request<{ results: { symbol: string; name: string; code: string; asset_type?: string }[] }>(
+      `/api/kline/instruments/search?q=${encodeURIComponent(q)}&limit=${limit}${assetTypes ? `&asset_types=${encodeURIComponent(assetTypes)}` : ''}`,
     ),
 
   /** 批量查股票名称 (传入 symbol 列表, 返回 {symbol: name}) */
@@ -1178,6 +1298,8 @@ export const api = {
     entry_fill?: 'close_t' | 'open_t+1' | null
     exit_fill?: 'close_t' | 'open_t+1' | null
     fees_pct?: number
+    commission_pct?: number
+    stamp_tax_pct?: number
     slippage_bps?: number
     max_positions?: number
     initial_capital?: number
@@ -1856,6 +1978,7 @@ export interface DataStatus {
   last_pipeline_run: string | null
   last_instruments_run: string | null
   checked_at: string
+  indicators_ready?: boolean
 }
 
 export interface EnrichedField {

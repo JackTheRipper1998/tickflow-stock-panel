@@ -90,6 +90,11 @@ def get_minute_sync_enabled() -> bool:
     return load().get("minute_sync_enabled", False)
 
 
+def get_minute_intraday_refresh() -> bool:
+    """自选列表分时图是否跟随实时行情刷新 (默认关闭, 开启后盘中按 SSE 频率刷新)。"""
+    return load().get("minute_intraday_refresh", False)
+
+
 def get_minute_sync_days() -> int:
     return max(1, min(30, load().get("minute_sync_days", 5)))
 
@@ -99,26 +104,39 @@ def get_minute_sync_days() -> int:
 _ALLOWED_DATA_PROVIDERS = {"tickflow"}
 
 
+def _allowed_data_providers() -> set[str]:
+    try:
+        from app.data_providers import custom as custom_sources
+        return _ALLOWED_DATA_PROVIDERS | custom_sources.names()
+    except Exception:  # noqa: BLE001
+        return set(_ALLOWED_DATA_PROVIDERS)
+
+
 def get_daily_data_provider() -> str:
     provider = str(load().get("daily_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _ALLOWED_DATA_PROVIDERS else "tickflow"
+    return provider if provider in _allowed_data_providers() else "tickflow"
 
 
 def get_adj_factor_provider() -> str:
     provider = str(load().get("adj_factor_provider", "same_as_daily") or "same_as_daily").lower()
     if provider == "same_as_daily":
         return provider
-    return provider if provider in _ALLOWED_DATA_PROVIDERS else "same_as_daily"
+    return provider if provider in _allowed_data_providers() else "same_as_daily"
 
 
 def get_minute_data_provider() -> str:
     provider = str(load().get("minute_data_provider", "tickflow") or "tickflow").lower()
-    return provider if provider in _ALLOWED_DATA_PROVIDERS else "tickflow"
+    return provider if provider in _allowed_data_providers() else "tickflow"
 
 
 def get_realtime_data_provider() -> str:
-    # 盘中实时现阶段仅支持 TickFlow。
-    return "tickflow"
+    provider = str(load().get("realtime_data_provider", "tickflow") or "tickflow").lower()
+    return provider if provider in _allowed_data_providers() else "tickflow"
+
+
+def get_financial_provider() -> str:
+    provider = str(load().get("financial_data_provider", "tickflow") or "tickflow").lower()
+    return provider if provider in _allowed_data_providers() else "tickflow"
 
 
 # ===== 盘后管道拉取内容开关 (A股 / ETF / 指数 独立控制) =====
@@ -497,6 +515,8 @@ def set_realtime_monitor_config(cfg: dict) -> dict:
         updates["sidebar_index_symbols"] = [s for s in cfg["sidebar_index_symbols"] if s in allowed]
     if "screener_auto_run" in cfg:
         updates["screener_auto_run"] = bool(cfg["screener_auto_run"])
+    if "minute_intraday_refresh" in cfg:
+        updates["minute_intraday_refresh"] = bool(cfg["minute_intraday_refresh"])
     if updates:
         save(updates)
     return get_realtime_monitor_config()
@@ -510,6 +530,7 @@ def get_realtime_monitor_config() -> dict:
         "strategy_monitor_ids": get_strategy_monitor_ids(),
         "sidebar_index_symbols": get_sidebar_index_symbols(),
         "screener_auto_run": get_screener_auto_run(),
+        "minute_intraday_refresh": get_minute_intraday_refresh(),
     }
 
 
