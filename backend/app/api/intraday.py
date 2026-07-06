@@ -191,3 +191,262 @@ def refresh_quotes(request: Request):
     if qs:
         return qs.refresh()
     return {"error": "QuoteService not available"}
+
+
+# ── 自选概念实时分时 ───────────────────────────────────────────────────────
+# 泛概念黑名单 (与前端 WatchlistConceptPanel.isGenericConcept 保持一致)
+_GENERIC_CONCEPTS = {
+    "融资融券", "转融券标的", "融资标的", "融券标的",
+    "新股与次新股", "注册制次新股", "次新股",
+    "标普道琼斯A股", "富时罗素概念", "富时罗素概念股", "MSCI中国", "MSCI概念",
+    "深股通", "沪股通", "陆股通", "B股概念", "AH股", "GDR", "H股",
+    "央视50", "破净股", "微盘股", "低价股", "破净整理", "高股息精选",
+}
+_CONCEPT_SOURCE_TABLE = {"kpl": "ext_kpl_theme", "ths": "ext_gn_ths"}
+
+
+def _is_generic_concept(c: str) -> bool:
+    return c in _GENERIC_CONCEPTS or c.endswith(("成份股", "成分股", "样本股", "标的"))
+
+
+@router.get("/concept-lines")
+def concept_intraday_lines(
+    request: Request,
+    source: str = Query("kpl", description="概念数据源: kpl=开盘啦 | ths=同花顺"),
+    sort: str = Query("strength", description="排序: strength=综合强度 | pct=涨幅榜 | money=资金榜(净流入)"),
+    limit: int = Query(24, ge=1, le=60, description="返回前 N 个概念"),
+):
+    """自选股所属概念的今日实时分时: 每个概念取其全市场成分股, 算等权平均涨幅的
+    分时序列 + 当前均涨 + 今日成交额 + 放量倍数, 供看板"自选概念实时"卡片网格。"""
+    import glob
+
+    import polars as pl
+
+    repo = getattr(request.app.state, "repo", None)
+    if repo is None:
+        return {"as_of": None, "trading": False, "items": []}
+    data_dir = repo.store.data_dir
+
+    # 1. 自选
+    wl_path = data_dir / "user_data" / "watchlist.parquet"
+    if not wl_path.exists():
+        return {"as_of": None, "trading": False, "items": []}
+    try:
+        wl = pl.read_parquet(wl_path)["symbol"].to_list()
+    except Exception:  # noqa: BLE001
+        return {"as_of": None, "trading": False, "items": []}
+
+    # 2. 概念表 → symbol→概念 / 概念→全市场成分
+    table = _CONCEPT_SOURCE_TABLE.get(source, "ext_kpl_theme")
+    ext_path = data_dir / "ext_data" / table / "part.parquet"
+    if not ext_path.exists():
+        return {"as_of": None, "trading": False, "items": [], "reason": f"{table} 未生成"}
+    ext = pl.read_parquet(ext_path)
+    sym2con: dict[str, list[str]] = {}
+    con2mem: dict[str, list[str]] = {}
+    sym2name: dict[str, str] = {}
+    name_col = "股票简称" if "股票简称" in ext.columns else None
+    sel = ["symbol", "所属概念"] + ([name_col] if name_col else [])
+    for row in ext.select(sel).iter_rows():
+        s, raw = row[0], row[1]
+        if name_col and row[2]:
+            sym2name[s] = row[2]
+        cs = [x.strip() for x in (raw or "").split(";") if x.strip()]
+        sym2con[s] = cs
+        for c in cs:
+            con2mem.setdefault(c, []).append(s)
+
+    # 3. 自选带出的概念 (去重 + 去泛概念)
+    wl_concepts: list[str] = []
+    seen: set[str] = set()
+    for s in wl:
+        for c in sym2con.get(s, []):
+            if c not in seen and not _is_generic_concept(c):
+                seen.add(c)
+                wl_concepts.append(c)
+    if not wl_concepts:
+        return {"as_of": None, "trading": False, "items": []}
+
+    # 4. 今日分钟 (全市场) + 昨收
+    mdirs = sorted(glob.glob(str(data_dir / "kline_minute" / "date=*")))
+    if not mdirs:
+        return {"as_of": None, "trading": False, "items": []}
+    today = mdirs[-1].split("date=")[-1]
+    try:
+        mins = pl.read_parquet(f"{mdirs[-1]}/part.parquet")
+    except Exception:  # noqa: BLE001
+        return {"as_of": today, "trading": False, "items": []}
+
+    members: set[str] = set()
+    for c in wl_concepts:
+        members.update(con2mem.get(c, []))
+
+    ddirs = sorted(glob.glob(str(data_dir / "kline_daily" / "date=*")))
+    prevdays = [d for d in ddirs if d.split("date=")[-1] < today]
+    if not prevdays:
+        return {"as_of": today, "trading": False, "items": []}
+    daily_prev = (
+        pl.read_parquet(f"{prevdays[-1]}/part.parquet")
+        .select(["symbol", "close"]).rename({"close": "prev_close"})
+    )
+
+    # 5. 分钟涨幅
+    m = (
+        mins.filter(pl.col("symbol").is_in(list(members)))
+        .join(daily_prev, on="symbol", how="inner")
+        .with_columns(((pl.col("close") / pl.col("prev_close")) - 1.0).alias("chg"))
+    )
+    if m.is_empty():
+        return {"as_of": today, "trading": False, "items": []}
+    # 分钟资金流方向 (买卖压力 MFM ∈ [-1,1]): 收盘越靠近最高→买盘主导, 越靠近最低→卖盘主导。
+    # mf = MFM × 该分钟成交额 → 全天累加得净流入额 (通达信/东财"分时资金流"近似)。
+    m = m.with_columns(
+        pl.when(pl.col("high") > pl.col("low"))
+        .then(((pl.col("close") - pl.col("low")) - (pl.col("high") - pl.col("close")))
+              / (pl.col("high") - pl.col("low")))
+        .otherwise(0.0)
+        .alias("_mfm")
+    ).with_columns((pl.col("_mfm") * pl.col("amount")).alias("mf"))
+    n_bars = m["datetime"].n_unique()
+    elapsed_frac = min(1.0, max(n_bars, 1) / 240.0)
+    last_dt = m["datetime"].max()
+
+    # 6. concept×symbol 展开
+    long_rows = [(c, s) for c in wl_concepts for s in con2mem.get(c, [])]
+    mem_df = pl.DataFrame(long_rows, schema=["concept", "symbol"], orient="row")
+    joined = mem_df.join(
+        m.select(["symbol", "datetime", "chg", "amount", "mf"]), on="symbol", how="inner"
+    )
+
+    # 分时序列 (每分钟等权平均涨幅)
+    series = (
+        joined.group_by(["concept", "datetime"])
+        .agg(pl.col("chg").mean().alias("v"))
+        .sort(["concept", "datetime"])
+    )
+    # 当前值 + 成分数 + 今日成交额
+    cur = (
+        joined.filter(pl.col("datetime") == last_dt)
+        .group_by("concept")
+        .agg(
+            pl.col("chg").mean().alias("avg_pct"),
+            pl.col("symbol").n_unique().alias("member_count"),
+        )
+    )
+    amt = joined.group_by("concept").agg(pl.col("amount").sum().alias("amount_today"))
+
+    # 资金净流入占比 (等权口径, 与平均涨幅一致, 避免单只大市值龙头主导):
+    #   1) 每只股票各自净流入占比 = Σ(分钟买卖压力×成交额)/Σ成交额 ∈ [-1,1] (本身 size 无关)
+    #   2) 过滤当日成交额过小的票 (< 1000万), 避免低流动性个股用 MFM 制造噪声
+    #   3) 概念内成分股 *等权* 平均 → 每只票权重相同, 反映"多数股票在被买还是被卖"
+    _AMT_FLOOR = 1e7
+    per_stock = (
+        m.group_by("symbol")
+        .agg(pl.col("mf").sum().alias("_net"), pl.col("amount").sum().alias("_amt"))
+        .filter(pl.col("_amt") >= _AMT_FLOOR)
+        .with_columns((pl.col("_net") / pl.col("_amt")).alias("s_inflow"))
+    )
+    mem_flow = (
+        mem_df.join(per_stock.select(["symbol", "s_inflow"]), on="symbol", how="inner")
+        .group_by("concept")
+        .agg(pl.col("s_inflow").mean().alias("inflow_ratio"))
+    )
+    inflow_map = dict(zip(mem_flow["concept"].to_list(), mem_flow["inflow_ratio"].to_list()))
+
+    # 放量倍数: 今日成交额 / (近5日概念日均成交额 × 已过时段占比)
+    vol_ratio_map: dict[str, float] = {}
+    last5 = prevdays[-5:]
+    if last5:
+        try:
+            d5 = pl.concat([
+                pl.read_parquet(f"{d}/part.parquet").select(["symbol", "amount"])
+                for d in last5
+            ])
+            d5j = mem_df.join(d5, on="symbol", how="inner")
+            avg5 = (
+                d5j.group_by("concept").agg(pl.col("amount").sum().alias("s"))
+                .with_columns((pl.col("s") / len(last5)).alias("avg5"))
+            )
+            avg5_map = dict(zip(avg5["concept"].to_list(), avg5["avg5"].to_list()))
+            amt_map = dict(zip(amt["concept"].to_list(), amt["amount_today"].to_list()))
+            for c in wl_concepts:
+                a5 = avg5_map.get(c)
+                at = amt_map.get(c)
+                if a5 and a5 > 0 and at is not None and elapsed_frac > 0:
+                    vol_ratio_map[c] = at / (a5 * elapsed_frac)
+        except Exception:  # noqa: BLE001
+            pass
+
+    stats = cur.join(amt, on="concept", how="left")
+    rows = stats.to_dicts()
+    for r in rows:
+        r["vol_ratio"] = vol_ratio_map.get(r["concept"])
+        r["inflow_ratio"] = inflow_map.get(r["concept"])
+
+    # 综合强度 (量价资金共振): 净流入/放量/涨幅 各自在概念集内的百分位排名加权。
+    def _prank(key: str) -> list[float]:
+        vals = [(r.get(key) if r.get(key) is not None else -1e18) for r in rows]
+        order = sorted(range(len(rows)), key=lambda i: vals[i])
+        n = len(rows)
+        out = [0.0] * n
+        for pos, i in enumerate(order):
+            out[i] = pos / (n - 1) if n > 1 else 0.5
+        return out
+    r_in, r_vol, r_pct = _prank("inflow_ratio"), _prank("vol_ratio"), _prank("avg_pct")
+    for i, r in enumerate(rows):
+        r["strength"] = 0.40 * r_in[i] + 0.35 * r_vol[i] + 0.25 * r_pct[i]
+
+    # 排序 + 取 top-N
+    if sort == "money":  # 资金榜: 净流入占比(反映主力进出方向, 与成分股数量无关)
+        rows.sort(key=lambda r: (r.get("inflow_ratio") if r.get("inflow_ratio") is not None else -1e9), reverse=True)
+    elif sort == "pct":  # 涨幅榜
+        rows.sort(key=lambda r: (r.get("avg_pct") if r.get("avg_pct") is not None else -1e9), reverse=True)
+    else:  # strength: 综合强度(默认)
+        rows.sort(key=lambda r: r.get("strength", 0.0), reverse=True)
+    top = rows[:limit]
+    top_names = {r["concept"] for r in top}
+
+    # 只为 top-N 附分时序列 (转北京时间 HH:MM)
+    ser_top = (
+        series.filter(pl.col("concept").is_in(list(top_names)))
+        .with_columns((pl.col("datetime") + pl.duration(hours=8)).dt.strftime("%H:%M").alias("t"))
+    )
+    ser_map: dict[str, list[dict]] = {}
+    for c, t, v in ser_top.select(["concept", "t", "v"]).iter_rows():
+        ser_map.setdefault(c, []).append({"t": t, "v": v})
+    # 降采样: 迷你分时线不需要全部 240 点, 概念多时控制包体
+    for c, lst in ser_map.items():
+        if len(lst) > 140:
+            step = (len(lst) + 119) // 120
+            ser_map[c] = lst[::step]
+
+    # 每个概念里"命中的自选股"(带当前涨幅), 供前端点开卡片查看
+    wl_set = set(wl)
+    cur_chg = dict(
+        m.filter(pl.col("datetime") == last_dt).select(["symbol", "chg"]).iter_rows()
+    )
+
+    items = []
+    for r in top:
+        c = r["concept"]
+        wl_members = sorted(
+            [
+                {"symbol": s, "name": sym2name.get(s, s), "pct": cur_chg.get(s)}
+                for s in con2mem.get(c, []) if s in wl_set
+            ],
+            key=lambda x: (x["pct"] if x["pct"] is not None else -1e9),
+            reverse=True,
+        )
+        items.append({
+            "concept": c,
+            "avg_pct": r.get("avg_pct"),
+            "member_count": r.get("member_count"),
+            "amount_today": r.get("amount_today"),
+            "vol_ratio": r.get("vol_ratio"),
+            "inflow_ratio": r.get("inflow_ratio"),
+            "strength": r.get("strength"),
+            "watchlist_members": wl_members,
+            "series": ser_map.get(c, []),
+        })
+
+    return {"as_of": today, "trading": elapsed_frac < 1.0, "items": items, "source": source, "sort": sort}

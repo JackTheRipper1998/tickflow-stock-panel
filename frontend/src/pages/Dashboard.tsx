@@ -15,6 +15,7 @@ import { STAGE_LABELS } from '@/components/data/ActiveJobCard'
 import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
 import { boardTag } from '@/components/stock-table/primitives'
+import { WatchlistConceptIntraday } from '@/components/WatchlistConceptIntraday'
 
 function n(v: number | null | undefined) {
   return typeof v === 'number' && Number.isFinite(v) ? v : null
@@ -749,6 +750,8 @@ export function Dashboard() {
               </div>
             </section>
           </div>
+
+          <WatchlistConceptIntraday onStockClick={(symbol, name) => setPreviewStock({ symbol, name })} />
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <HotRankCard title="概念热度" rank={data.concept_rank} configUrl="/concept-analysis" onStockClick={(symbol, name) => setPreviewStock({symbol, name})} />

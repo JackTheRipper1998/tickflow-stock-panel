@@ -268,6 +268,18 @@ export interface ScreenerResult {
   elapsed_ms: number
 }
 
+export interface ConceptLine {
+  concept: string
+  avg_pct: number | null
+  member_count: number
+  amount_today: number | null
+  vol_ratio: number | null
+  inflow_ratio: number | null
+  strength?: number | null
+  watchlist_members: { symbol: string; name: string; pct: number | null }[]
+  series: { t: string; v: number }[]
+}
+
 export interface MarketSnapshotRow {
   symbol: string
   name?: string | null
@@ -1119,6 +1131,20 @@ export const api = {
     }>(
       `/api/kline/minute?symbol=${encodeURIComponent(symbol)}${date ? `&date=${date}` : ''}`,
     ),
+  conceptIntradayLines: (params?: { source?: string; sort?: string; limit?: number }) => {
+    const q = new URLSearchParams()
+    if (params?.source) q.set('source', params.source)
+    if (params?.sort) q.set('sort', params.sort)
+    if (params?.limit != null) q.set('limit', String(params.limit))
+    const qs = q.toString()
+    return request<{
+      as_of: string | null
+      trading: boolean
+      source: string
+      sort: string
+      items: ConceptLine[]
+    }>(`/api/intraday/concept-lines${qs ? `?${qs}` : ''}`)
+  },
   indexList: () => request<{ results: IndexInstrument[]; count: number }>('/api/index/list'),
   indexSearch: (q: string, limit = 20) =>
     request<{ results: IndexInstrument[] }>(

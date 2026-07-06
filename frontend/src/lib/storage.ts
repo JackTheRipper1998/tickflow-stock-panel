@@ -60,6 +60,15 @@ export const storage = {
   /** 自选概念透视数据源: kpl=开盘啦题材 | ths=同花顺概念 */
   watchlistConceptSource: kv<'kpl' | 'ths'>('watchlist_conceptSource'),
 
+  /** 看板·自选概念实时 榜单排序: strength=综合强度 | pct=涨幅榜 | money=资金榜 */
+  dashConceptSort: kv<'strength' | 'pct' | 'money'>('dash_conceptSort'),
+
+  /** 看板·自选概念实时 展示数量档位 */
+  dashConceptLimit: kv<number>('dash_conceptLimit'),
+
+  /** 自选页 实时·策略动态开关: 开启后实时模式下列表由策略选股驱动(不改写手动自选) */
+  watchlistStrategyDynamic: kv<boolean>('watchlist_strategyDynamic'),
+
   /** Screener 卡片尺寸 */
   screenerCardSize:     kv<string>('screener-card-size'),
 
