@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, Suspense } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
-import { useQuoteStream } from '@/lib/useQuoteStream'
+import { useQuoteStream, useQuoteStreamStatus } from '@/lib/useQuoteStream'
 import { ToastContainer } from '@/components/Toast'
 import { AlertToastContainer } from '@/components/AlertToast'
 import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
@@ -46,6 +46,7 @@ import {
   Sun,
   Moon,
   X,
+  WifiOff,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
@@ -150,7 +151,7 @@ function SidebarIndexQuotes({ rows, items }: { rows: IndexQuote[] | undefined; i
               <span className="text-[10px] text-secondary">{item.name}</span>
               <span className={`text-[10px] font-mono ${indexPctClass(pct)}`}>{fmtIndexPct(pct)}</span>
             </div>
-            <div className="mt-0.5 truncate font-mono text-[10px] text-foreground/80">
+            <div className={`mt-0.5 truncate font-mono text-[10px] ${indexPctClass(pct)}`}>
               {fmtIndexValue(value)}
             </div>
           </NavLink>
@@ -337,10 +338,14 @@ export function Layout() {
 
   // SSE: 行情更新时自动刷新相关 queries + 告警通知
   useQuoteStream(realtimeEnabled, prefs?.sse_refresh_pages)
+  // 实时 SSE 连接状态 — 断开时顶部显示徽标, 提示可能漏策略告警
+  const streamStatus = useQuoteStreamStatus()
 
   const toggleQuote = useToggleRealtimeQuotes()
   const isRunning = quoteStatus?.running ?? false
   const isTrading = quoteStatus?.is_trading_hours ?? false
+  // 管道/数据修正运行期间实时行情被临时暂停 — 此时禁止开启
+  const isPaused = quoteStatus?.paused ?? false
   const tier = tierRank(caps?.label ?? '')
   const isNoneTier = tier < 0
   const isWatchlistMode = tier === 0
@@ -586,12 +591,13 @@ export function Layout() {
               </div>
               <button
                 onClick={() => handleToggle(!realtimeEnabled)}
-                disabled={toggleQuote.isPending}
+                disabled={toggleQuote.isPending || isPaused}
+                title={isPaused ? '数据同步运行中，实时行情已临时暂停' : undefined}
                 className={`relative inline-flex h-4 w-7 items-center rounded-full shrink-0 transition-colors duration-200 ${
                   realtimeEnabled
                     ? 'bg-accent shadow-[0_0_6px_rgba(59,130,246,0.3)]'
                     : 'bg-elevated'
-                } ${toggleQuote.isPending ? 'opacity-50' : 'cursor-pointer'}`}
+                } ${toggleQuote.isPending || isPaused ? 'opacity-50' : 'cursor-pointer'}`}
               >
                 <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform duration-200 ${
                   realtimeEnabled ? 'translate-x-[14px]' : 'translate-x-0.5'
@@ -615,7 +621,9 @@ export function Layout() {
                   </button>
                 </div>
               )}
-              {isRunning && isTrading ? (
+              {isPaused ? (
+                <div className="text-warning/80">数据同步运行中，实时行情已临时暂停</div>
+              ) : isRunning && isTrading ? (
                 <div className="text-accent">行情运行中</div>
               ) : realtimeEnabled && !isTrading ? (
                 <div className="text-warning/70">非交易时段，将在交易时间自动开启</div>
@@ -659,7 +667,25 @@ export function Layout() {
         transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
         className="h-full overflow-auto scrollbar-gutter-stable"
       >
-        <Outlet />
+        {streamStatus === 'reconnecting' && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="fixed top-3 right-4 z-[9998] flex items-center gap-1.5 rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-[11px] font-medium text-warning shadow-lg backdrop-blur-md"
+          >
+            <WifiOff className="h-3 w-3 shrink-0 animate-pulse" />
+            实时连接断开 · 重连中
+          </div>
+        )}
+        <Suspense
+          fallback={
+            <div className="flex items-center justify-center py-24">
+              <Loader2 className="h-5 w-5 animate-spin text-muted" />
+            </div>
+          }
+        >
+          <Outlet />
+        </Suspense>
       </motion.main>
       <ToastContainer />
       <AlertToastContainer />
