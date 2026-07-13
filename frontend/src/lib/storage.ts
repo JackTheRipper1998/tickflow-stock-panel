@@ -113,8 +113,8 @@ export const storage = {
     start: string
     end: string
     matching: 'close_t' | 'open_t+1'
-    entryFill: 'close_t' | 'open_t+1' | 'after_950' | 'tail' | 'after_1300'
-    exitFill: 'close_t' | 'open_t+1' | 'after_950' | 'high_t+1'
+    entryFill: 'close_t' | 'open_t+1'
+    exitFill: 'close_t' | 'open_t+1'
     fees: string
     stampTax?: string
     slippage: string

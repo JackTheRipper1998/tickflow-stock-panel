@@ -736,8 +736,8 @@ export function StrategyBacktest() {
   const [end, setEnd] = useState(saved?.end ?? TODAY)
   // 成交口径: 建仓/清仓可独立配置。向后兼容老 matching (派生为 entry=exit=matching)。
   const [matching] = useState<'close_t' | 'open_t+1'>(saved?.matching ?? 'open_t+1')
-  const [entryFill, setEntryFill] = useState<'close_t' | 'open_t+1' | 'after_950' | 'tail' | 'after_1300'>(saved?.entryFill ?? saved?.matching ?? 'open_t+1')
-  const [exitFill, setExitFill] = useState<'close_t' | 'open_t+1' | 'after_950' | 'high_t+1'>(saved?.exitFill ?? saved?.matching ?? 'close_t')
+  const [entryFill, setEntryFill] = useState<'close_t' | 'open_t+1'>(saved?.entryFill ?? saved?.matching ?? 'open_t+1')
+  const [exitFill, setExitFill] = useState<'close_t' | 'open_t+1'>(saved?.exitFill ?? saved?.matching ?? 'close_t')
   const [fees, setFees] = useState(saved?.fees ?? '2')
   const [stampTax, setStampTax] = useState(saved?.stampTax ?? '1')
   const [slippage, setSlippage] = useState(saved?.slippage ?? '5')
@@ -1340,9 +1340,6 @@ export function StrategyBacktest() {
             </div>
             <select value={entryFill} onChange={e => setEntryFill(e.target.value as any)} className={INPUT_CLS}>
               <option value="open_t+1">次日开盘成交（推荐）</option>
-              <option value="after_950">次日9:50后买入</option>
-              <option value="after_1300">次日下午开盘买入（13:00）</option>
-              <option value="tail">次日尾盘买入</option>
               <option value="close_t">信号日收盘成交</option>
             </select>
           </div>
@@ -1350,8 +1347,6 @@ export function StrategyBacktest() {
             <label className="text-xs font-medium text-secondary block mb-1.5">清仓口径</label>
             <select value={exitFill} onChange={e => setExitFill(e.target.value as any)} className={INPUT_CLS}>
               <option value="close_t">到期/信号日收盘成交（推荐）</option>
-              <option value="high_t+1">次日最高价卖出</option>
-              <option value="after_950">次日9:50后清仓</option>
               <option value="open_t+1">次日开盘成交</option>
             </select>
           </div>

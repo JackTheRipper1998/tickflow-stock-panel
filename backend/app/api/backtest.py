@@ -195,8 +195,8 @@ class StrategyBacktestRequest(BaseModel):
     overrides: dict | None = None
     # matching 向后兼容; 显式传 entry_fill/exit_fill 时以二者为准。
     matching: Literal["close_t", "open_t+1"] = "open_t+1"
-    entry_fill: Literal["close_t", "open_t+1", "after_950", "tail", "after_1300"] | None = None
-    exit_fill: Literal["close_t", "open_t+1", "after_950", "high_t+1"] | None = None
+    entry_fill: Literal["close_t", "open_t+1"] | None = None
+    exit_fill: Literal["close_t", "open_t+1"] | None = None
     fees_pct: float = 0.0002
     commission_pct: float | None = None
     stamp_tax_pct: float | None = None

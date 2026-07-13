@@ -1422,8 +1422,8 @@ export const api = {
     params?: Record<string, any> | null
     overrides?: Record<string, any> | null
     matching?: 'close_t' | 'open_t+1'
-    entry_fill?: 'close_t' | 'open_t+1' | 'after_950' | 'tail' | 'after_1300' | null
-    exit_fill?: 'close_t' | 'open_t+1' | 'after_950' | 'high_t+1' | null
+    entry_fill?: 'close_t' | 'open_t+1' | null
+    exit_fill?: 'close_t' | 'open_t+1' | null
     fees_pct?: number
     commission_pct?: number
     stamp_tax_pct?: number
