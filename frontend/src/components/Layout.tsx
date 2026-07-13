@@ -38,7 +38,6 @@ import {
   Sparkles,
   Layers3,
   Landmark,
-  Cable,
   RadioTower,
   CheckCircle2,
   BookOpenCheck,
@@ -80,7 +79,6 @@ const nav = [
   { to: '/monitor', label: '监控中心', icon: RadioTower },
   { to: '/review',      label: '复盘',   icon: BookOpenCheck },
   { to: '/indices', label: '指数', icon: BarChart3 },
-  { to: '/trading', label: '交易', icon: Cable },
   { to: '/data',       label: '数据',   icon: Database },
 ] as const
 
@@ -338,7 +336,7 @@ export function Layout() {
 
   // SSE: 行情更新时自动刷新相关 queries + 告警通知
   useQuoteStream(realtimeEnabled, prefs?.sse_refresh_pages)
-  // 实时 SSE 连接状态 — 断开时顶部显示徽标, 提示可能漏策略告警
+  // 实时 SSE 连接状态 — 断开时底部显示提示, 提示可能漏策略告警
   const streamStatus = useQuoteStreamStatus()
 
   const toggleQuote = useToggleRealtimeQuotes()
@@ -481,7 +479,7 @@ export function Layout() {
                   <Icon className="h-4 w-4 shrink-0" />
                   <span className="flex-1">{label}</span>
                   {/* 个股分析 Beta 标识 */}
-                  {(to === '/stock-analysis' || to === '/review') && (
+                  {to === '/stock-analysis' && (
                     <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
                       Beta
                     </span>
@@ -671,10 +669,10 @@ export function Layout() {
           <div
             role="status"
             aria-live="polite"
-            className="fixed top-3 right-4 z-[9998] flex items-center gap-1.5 rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-[11px] font-medium text-warning shadow-lg backdrop-blur-md"
+            className="fixed bottom-4 left-1/2 z-[9998] flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-warning/30 bg-warning/10 px-2.5 py-1 text-[11px] font-medium text-warning shadow-lg backdrop-blur-md"
           >
             <WifiOff className="h-3 w-3 shrink-0 animate-pulse" />
-            实时连接断开 · 重连中
+            与服务连接已断开 · 正在重连
           </div>
         )}
         <Suspense
