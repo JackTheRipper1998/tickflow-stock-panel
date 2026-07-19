@@ -28,7 +28,15 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
-FEE_ROUND_TRIP = 0.0025          # 往返费用
+# 往返费用 (2026-07-19 按用户实际费率拆分):
+#   佣金 万0.85 双边 + 印花税 0.05% 卖出单边 + 过户费 0.001% 双边 = 硬成本约 0.069%
+#   滑点假设 0.10% 往返 (开盘价/收盘价成交的现实偏移, 可调)
+COMMISSION_PER_SIDE = 0.000085
+STAMP_TAX_SELL = 0.0005
+TRANSFER_PER_SIDE = 0.00001
+SLIPPAGE_ROUND_TRIP = 0.0010
+FEE_ROUND_TRIP = (2 * COMMISSION_PER_SIDE + STAMP_TAX_SELL
+                  + 2 * TRANSFER_PER_SIDE + SLIPPAGE_ROUND_TRIP)   # ≈ 0.169%
 LIMIT_OPEN_SKIP = 0.097          # T+1 开盘涨幅超过该值视为无法买入
 MIN_AVG_CANDIDATES = 8.0         # 条件保留标准: 日均候选下限
 MAX_TRAIL_DAYS = 10              # 跟踪止盈最长持有

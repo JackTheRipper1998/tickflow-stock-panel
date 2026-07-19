@@ -58,7 +58,8 @@ def main() -> None:
     mid = didx_list[len(didx_list) // 2]
 
     print(f"\n{'='*100}")
-    print("第二轮: 三种配置 × 四种持有口径 (全部净收益, 已扣费0.25%)")
+    from scripts.ablation_trend_upgrade import FEE_ROUND_TRIP
+    print(f"第二轮: 三种配置 × 四种持有口径 (全部净收益, 已扣费{FEE_ROUND_TRIP*100:.3f}%)")
     print(f"{'='*100}")
 
     for cfg_name, mask in _configs().items():
