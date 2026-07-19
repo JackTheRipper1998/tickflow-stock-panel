@@ -181,7 +181,12 @@ export function Screener() {
   // 进入页面自动跑策略池中的策略，获取命中数
   const runAll = useMutation({
     mutationFn: ({ date, strategyIds }: { date?: string; strategyIds?: string[] } = {}) =>
-      api.screenerRunAll(date, strategyIds ?? visiblePool, extColumnsParam || undefined),
+      api.screenerRunAll(
+        date,
+        strategyIds ?? visiblePool,
+        extColumnsParam || undefined,
+        assetType,
+      ),
     onSuccess: (data) => {
       if (data.as_of) setAsOf(data.as_of)
     },
@@ -364,12 +369,13 @@ export function Screener() {
   // 分时数据加载策略 (与自选页一致, 简洁优先):
   //  - 全量加载当前列表 symbol, 但按套餐 batch 上限截断 (Pro=100 / Expert=200),
   //    超出时只取前 batch 只并提示用户, 避免一次性发太多请求打爆 rpm 配额
-  //  - 刷新: minute_intraday_refresh 偏好开启时盘中 15s 轮询; 否则仅首次加载,
+  //  - 刷新: minute_intraday_refresh 偏好开启时按用户设定间隔轮询; 否则仅首次加载,
   //    用户可点表头刷新按钮手动更新
   const minuteBatchCap = caps.data?.capabilities?.['kline.minute.batch']?.batch ?? 100
   const quoteStatus = useQuoteStatus()
   const realtimeRunning = quoteStatus.data?.running ?? false
   const intradayRefreshEnabled = prefs?.minute_intraday_refresh ?? false
+  const intradayRefreshInterval = prefs?.minute_intraday_refresh_interval ?? 6
 
   const allIntradaySymbols = useMemo(
     () => displayRows.map((r: any) => r.symbol),
@@ -391,7 +397,7 @@ export function Screener() {
     enabled: intradayVisible && intradaySymbols.length > 0,
     staleTime: 10_000,
     // 仅当开启分时刷新偏好 且 盘中实时行情运行时 才轮询 (省 rpm)
-    refetchInterval: (intradayRefreshEnabled && realtimeRunning) ? 15_000 : false,
+    refetchInterval: (intradayRefreshEnabled && realtimeRunning) ? intradayRefreshInterval * 1000 : false,
   })
   const minuteData = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
 
@@ -498,7 +504,7 @@ export function Screener() {
       inList ? api.watchlistRemove(symbol) : api.watchlistAdd(symbol),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.watchlist })
-      qc.invalidateQueries({ queryKey: QK.watchlistEnriched() })
+      qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
     },
   })
 
@@ -894,7 +900,7 @@ export function Screener() {
                 <ScanSearch className="h-7 w-7 text-accent/40" />
               </div>
               <div className="flex flex-col items-center gap-1.5">
-                <span className="text-sm text-secondary">可先在右上角切换日期，再点击策略卡片查看选股结果</span>
+                <span className="text-sm text-secondary">点击策略卡片查看选股结果</span>
                 <span className="text-[11px] text-muted">若提示 enriched 表无数据，请先运行盘后管道</span>
               </div>
             </div>
@@ -975,8 +981,9 @@ export function Screener() {
         open={showBuilder}
         onClose={() => setShowBuilder(false)}
         mode={builderMode}
+        existingStrategyIds={availableStrategyIds}
         onSavedId={async id => {
-          const data = await qc.fetchQuery({ queryKey: QK.screenerStrategies('stock'), queryFn: () => api.screenerStrategies('stock') })
+          const data = await qc.fetchQuery({ queryKey: QK.screenerStrategies('stock'), queryFn: () => api.screenerStrategies('stock'), staleTime: 0 })
           if (!data.presets.some(s => s.id === id)) {
             throw new Error(`策略 ${id} 已保存但未加载，请检查策略代码`)
           }

@@ -1,7 +1,8 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, CalendarDays, Zap, Clock, RotateCcw } from 'lucide-react'
+import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, CalendarDays, Zap, Clock, RotateCcw, ImagePlus } from 'lucide-react'
 import { api, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
@@ -9,8 +10,15 @@ import { fmtPrice, fmtPct, fmtBigNum, priceColorClass } from '@/lib/format'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import {
+  DimensionMembersDialog,
+  dimensionKindForSourceField,
+  type DimensionMembersTarget,
+} from '@/components/DimensionMembersDialog'
+import { WatchlistImportDialog } from '@/components/WatchlistImportDialog'
 import { ColumnCustomizer } from '@/components/ColumnCustomizer'
 import { StockDataTable } from '@/components/stock-table/StockDataTable'
+import { VIRTUAL_LIST_THRESHOLD, useParentScroll } from '@/components/virtual-list/useParentScroll'
 import { useTableSort } from '@/components/stock-table/useTableSort'
 import { MiniCandlestick } from '@/components/stock-table/MiniCandlestick'
 import { MiniIntraday } from '@/components/stock-table/MiniIntraday'
@@ -66,6 +74,7 @@ function renderExtValue(
   expanded: boolean,
   onToggle: () => void,
   inline?: boolean,
+  onTagClick?: (tag: string) => void,
 ): React.ReactNode {
   if (val == null || Number.isNaN(val)) return <span className="text-muted">—</span>
   if (typeof val === 'number') {
@@ -108,7 +117,16 @@ function renderExtValue(
 
   const tagEls = (
     <>
-      {visibleTags.map((tag, i) => (
+      {visibleTags.map((tag, i) => onTagClick ? (
+        <button
+          key={i}
+          type="button"
+          onClick={event => { event.stopPropagation(); onTagClick(tag) }}
+          className="inline-block px-1.5 py-px rounded text-[10px] font-medium leading-tight text-yellow-500 bg-yellow-500/10 hover:brightness-95"
+        >
+          {tag}
+        </button>
+      ) : (
         <span key={i} className="inline-block px-1.5 py-px rounded text-[10px] font-medium leading-tight text-yellow-500 bg-yellow-500/10">
           {tag}
         </span>
@@ -146,12 +164,15 @@ function renderExtCell(
   col: ColumnConfig,
   expandedCells: Set<string>,
   onToggleExpand: (key: string) => void,
+  onDimensionClick: (target: DimensionMembersTarget) => void,
 ): React.ReactNode {
   if (col.source.type !== 'ext') return null
   const { configId, fieldName } = col.source
   const val = r[`${configId}__${fieldName}`]
   const cellKey = `${r.symbol}::${col.id}`
   const expanded = expandedCells.has(cellKey)
+  const sourceField = `${configId}.${fieldName}`
+  const dimensionKind = dimensionKindForSourceField(sourceField)
 
   const style: React.CSSProperties = {}
   if (col.extDisplay?.maxWidth) {
@@ -169,7 +190,14 @@ function renderExtCell(
 
   return (
     <td className={tdClass} style={style}>
-      {renderExtValue(val, col, expanded, () => onToggleExpand(cellKey))}
+      {renderExtValue(
+        val,
+        col,
+        expanded,
+        () => onToggleExpand(cellKey),
+        false,
+        dimensionKind ? value => onDimensionClick({ kind: dimensionKind, value, sourceField }) : undefined,
+      )}
     </td>
   )
 }
@@ -327,6 +355,26 @@ function RealtimeDot({ title = '实时监控中' }: { title?: string }) {
 // 共享的空 K 线数组常量 — 避免每次渲染传入新的 [] 破坏 StockCard 的 memo
 const EMPTY_KLINE: KlineRow[] = []
 
+function cardColumnCount(viewportWidth: number): number {
+  if (viewportWidth >= 1536) return 6
+  if (viewportWidth >= 1280) return 5
+  if (viewportWidth >= 768) return 4
+  if (viewportWidth >= 640) return 3
+  return 2
+}
+
+function useCardColumnCount(): number {
+  const [count, setCount] = useState(() => cardColumnCount(window.innerWidth))
+
+  useEffect(() => {
+    const update = () => setCount(cardColumnCount(window.innerWidth))
+    window.addEventListener('resize', update)
+    return () => window.removeEventListener('resize', update)
+  }, [])
+
+  return count
+}
+
 const StockCard = React.memo(function StockCard({
   r,
   candleRows,
@@ -339,6 +387,7 @@ const StockCard = React.memo(function StockCard({
   extCols,
   expandedCells,
   onToggleExpand,
+  onDimensionClick,
   isMonitored,
 }: {
   r: any
@@ -352,6 +401,7 @@ const StockCard = React.memo(function StockCard({
   extCols: ColumnConfig[]
   expandedCells: Set<string>
   onToggleExpand: (key: string) => void
+  onDimensionClick: (target: DimensionMembersTarget) => void
   isMonitored?: boolean
 }) {
   const board = boardTag(r.symbol)
@@ -455,12 +505,21 @@ const StockCard = React.memo(function StockCard({
 
             const cellKey = `${r.symbol}::${col.id}`
             const expanded = expandedCells.has(cellKey)
+            const sourceField = `${configId}.${fieldName}`
+            const dimensionKind = dimensionKindForSourceField(sourceField)
 
             return (
               <span key={col.id} title={col.label}>
                 <span className="text-secondary">{fieldName}</span>
                 <span className="font-mono ml-0.5">
-                  {renderExtValue(val, col, expanded, () => onToggleExpand(cellKey), true)}
+                  {renderExtValue(
+                    val,
+                    col,
+                    expanded,
+                    () => onToggleExpand(cellKey),
+                    true,
+                    dimensionKind ? value => onDimensionClick({ kind: dimensionKind, value, sourceField }) : undefined,
+                  )}
                 </span>
               </span>
             )
@@ -511,6 +570,7 @@ export function Watchlist() {
   // 列配置 — 从后端/localStorage 异步加载
   const [columns, setColumns] = useState<ColumnConfig[]>([...BUILTIN_COLUMNS])
   const [customizerOpen, setCustomizerOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const columnsLoaded = useRef(false)
 
   useEffect(() => {
@@ -581,6 +641,7 @@ export function Watchlist() {
   }, [])
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
   const [previewName, setPreviewName] = useState<string>('')
+  const [dimensionTarget, setDimensionTarget] = useState<DimensionMembersTarget | null>(null)
   const [expandedCells, setExpandedCells] = useState<Set<string>>(new Set())
   const closePreview = useCallback(() => {
     setPreviewSymbol(null)
@@ -643,16 +704,17 @@ export function Watchlist() {
   const klineData = dailyKVisible ? (klineBatch.data?.data ?? {}) : {}
 
   // 批量分时数据 (Pro+ 用户, 列可见时才拉)
-  // 刷新策略: 实时行情运行中自动按 15s 轮询 (不接 SSE 高频, 避免每秒拉 TickFlow 触限流);
-  // 用户也可在实时监控设置里单独开启 minute_intraday_refresh 强制刷新 (即使未开实时行情)
+  // 刷新策略: 仅当实时行情运行 且 用户在实时监控设置里开启 minute_intraday_refresh 时
+  // 按用户设定的间隔轮询 (不接 SSE 高频, 避免每秒拉 TickFlow 触限流); 与 Screener / 设置卡片描述一致。
   const { data: prefsData } = usePreferences()
   const intradayRefreshEnabled = prefsData?.minute_intraday_refresh ?? false
+  const intradayRefreshInterval = prefsData?.minute_intraday_refresh_interval ?? 6
   const minuteBatch = useQuery({
     queryKey: QK.minuteBatch(symbolsKey),
     queryFn: () => api.klineMinuteBatch(symbols),
     enabled: intradayVisible && symbols.length > 0,
     staleTime: 10_000,
-    refetchInterval: (realtimeRunning || intradayRefreshEnabled) ? 15_000 : false,
+    refetchInterval: (intradayRefreshEnabled && realtimeRunning) ? intradayRefreshInterval * 1000 : false,
   })
   const minuteData = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
 
@@ -676,7 +738,7 @@ export function Watchlist() {
       })
       // 2. 清除 list 缓存，触发后台 refetch
       qc.invalidateQueries({ queryKey: QK.watchlist })
-      qc.invalidateQueries({ queryKey: QK.watchlistEnriched() })
+      qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
       qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
     },
   })
@@ -700,7 +762,7 @@ export function Watchlist() {
       // 立即清空 enriched 缓存
       qc.setQueryData(['watchlist-enriched', extColumnsParam], { rows: [], as_of: null, elapsed_ms: 0 })
       qc.invalidateQueries({ queryKey: QK.watchlist })
-      qc.invalidateQueries({ queryKey: QK.watchlistEnriched() })
+      qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
       qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
     },
   })
@@ -921,6 +983,24 @@ export function Watchlist() {
     [filteredRows, sortRows, columns],
   )
 
+  const cardColumns = useCardColumnCount()
+  const cardGridRef = useRef<HTMLDivElement>(null)
+  const virtualizeCards = viewMode === 'card' && sortedRows.length > VIRTUAL_LIST_THRESHOLD
+  const cardRowCount = Math.ceil(sortedRows.length / cardColumns)
+  const { getScrollElement: getCardScrollElement, scrollMargin: cardScrollMargin } = useParentScroll(
+    cardGridRef,
+    virtualizeCards,
+  )
+  const cardRowVirtualizer = useVirtualizer({
+    count: virtualizeCards ? cardRowCount : 0,
+    getScrollElement: getCardScrollElement,
+    estimateSize: () => dailyKVisible ? 180 : 140,
+    getItemKey: index => `${cardColumns}:${(sortedRows[index * cardColumns] as any)?.symbol ?? index}`,
+    gap: 12,
+    overscan: 3,
+    scrollMargin: cardScrollMargin,
+  })
+
   // 可见的 ext 列（卡片视图使用）
   const visibleExtCols = useMemo(
     () => visibleColumns.filter(c => c.source.type === 'ext'),
@@ -938,6 +1018,25 @@ export function Watchlist() {
   // "被筛选条件隐藏" 的个股数: 后端返回的行数 vs 经过前端筛选后的行数.
   // rows.length 是后端实际返回 (含 pending 行), 减去 sortedRows (筛选后) 才是真正的筛选隐藏.
   const hiddenCount = Math.max(0, rows.length - sortedRows.length)
+
+  const renderStockCard = (r: any) => (
+    <StockCard
+      key={r.symbol}
+      r={r}
+      candleRows={klineData[r.symbol] ?? EMPTY_KLINE}
+      showCandle={dailyKVisible}
+      onPreview={handleCardPreview}
+      onConfirmRemove={handleCardConfirmRemove}
+      onCancelRemove={handleCardCancelRemove}
+      onRequestRemove={handleCardRequestRemove}
+      isConfirming={confirmRemove === r.symbol}
+      extCols={visibleExtCols}
+      expandedCells={expandedCells}
+      onToggleExpand={handleToggleExpand}
+      onDimensionClick={setDimensionTarget}
+      isMonitored={monitoredSymbols.has(r.symbol)}
+    />
+  )
 
   return (
     <div className="flex flex-col h-full">
@@ -1003,6 +1102,13 @@ export function Watchlist() {
               existingSymbols={allSymbols as string[]}
               onAdd={(sym) => addMutation.mutate(sym)}
             />
+            <button
+              onClick={() => setImportOpen(true)}
+              className="inline-flex items-center justify-center h-8 w-8 rounded-btn bg-elevated hover:bg-elevated/80 text-secondary hover:text-foreground transition-colors duration-150 ease-smooth"
+              title="从截图导入自选"
+            >
+              <ImagePlus className="h-4 w-4" />
+            </button>
             <div className="w-px h-5 bg-border" />
             {/* 视图 */}
             <button
@@ -1193,7 +1299,7 @@ export function Watchlist() {
             <EmptyState
               icon={Star}
               title="自选股为空"
-              hint="点击右上角搜索按钮查找并预览标的，进入个股详情后可添加到自选。"
+              hint="点击右上角搜索添加标的，或点击图片图标从券商自选截图批量导入。"
             />
           ) : (inStrategyMode && !strategyQuery.isLoading && strategyRows.length === 0) ? (
             <div className="py-8 text-center text-sm text-muted">策略当前无选股(可能今日无标的通过集合竞价确认)</div>
@@ -1229,6 +1335,7 @@ export function Watchlist() {
                   )
                 }
                 if (col.source.type === 'builtin' && col.source.key === 'intraday') {
+                  const intradayAutoRefresh = intradayRefreshEnabled && realtimeRunning
                   return (
                     <span className="inline-flex items-center justify-center gap-1.5">
                       <span>{col.label}</span>
@@ -1245,6 +1352,23 @@ export function Watchlist() {
                       >
                         {intradayChartVisible ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
                       </button>
+                      {/* 分时图显示 且 未开自动轮询时, 提供手动刷新按钮 */}
+                      {intradayChartVisible && !intradayAutoRefresh && (
+                        <button
+                          type="button"
+                          onClick={(event) => { event.stopPropagation(); minuteBatch.refetch() }}
+                          disabled={minuteBatch.isFetching}
+                          className="inline-flex items-center justify-center w-5 h-5 rounded text-muted hover:text-accent hover:bg-accent/10 transition-colors disabled:opacity-40"
+                          title="刷新分时数据"
+                          aria-label="刷新分时数据"
+                        >
+                          <RefreshCw className={`h-3.5 w-3.5 ${minuteBatch.isFetching ? 'animate-spin' : ''}`} />
+                        </button>
+                      )}
+                      {/* 自动轮询中: 显示旋转图标提示正在实时刷新 */}
+                      {intradayChartVisible && intradayAutoRefresh && (
+                        <RefreshCw className="h-3 w-3 text-accent/60 animate-spin" aria-label="实时刷新中" />
+                      )}
                     </span>
                   )
                 }
@@ -1253,7 +1377,7 @@ export function Watchlist() {
               renderCell={(r: any, col: ColumnConfig) => {
                 // ext 列
                 if (col.source.type === 'ext') {
-                  return renderExtCell(r, col, expandedCells, handleToggleExpand)
+                  return renderExtCell(r, col, expandedCells, handleToggleExpand, setDimensionTarget)
                 }
                 const key = col.source.key
                 const price = r.rt_price ?? r.close
@@ -1418,25 +1542,31 @@ export function Watchlist() {
               }}
               className="rounded-card overflow-x-auto"
             />
-          ) : (
+          ) : !virtualizeCards ? (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-3">
-              {sortedRows.map((r: any) => (
-                <StockCard
-                  key={r.symbol}
-                  r={r}
-                  candleRows={klineData[r.symbol] ?? EMPTY_KLINE}
-                  showCandle={dailyKVisible}
-                  onPreview={handleCardPreview}
-                  onConfirmRemove={handleCardConfirmRemove}
-                  onCancelRemove={handleCardCancelRemove}
-                  onRequestRemove={handleCardRequestRemove}
-                  isConfirming={confirmRemove === r.symbol}
-                  extCols={visibleExtCols}
-                  expandedCells={expandedCells}
-                  onToggleExpand={handleToggleExpand}
-                  isMonitored={monitoredSymbols.has(r.symbol)}
-                />
-              ))}
+              {sortedRows.map(renderStockCard)}
+            </div>
+          ) : (
+            <div
+              ref={cardGridRef}
+              className="relative"
+              style={{ height: cardRowVirtualizer.getTotalSize() }}
+            >
+              {cardRowVirtualizer.getVirtualItems().map(virtualRow => {
+                const start = virtualRow.index * cardColumns
+                const row = sortedRows.slice(start, start + cardColumns)
+                return (
+                  <div
+                    key={virtualRow.key}
+                    ref={cardRowVirtualizer.measureElement}
+                    data-index={virtualRow.index}
+                    className="absolute left-0 top-0 w-full grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-3"
+                    style={{ transform: `translateY(${virtualRow.start - cardScrollMargin}px)` }}
+                  >
+                    {row.map(renderStockCard)}
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>
@@ -1498,6 +1628,18 @@ export function Watchlist() {
         name={previewName}
         onClose={closePreview}
       />
+
+      <DimensionMembersDialog
+        target={dimensionTarget}
+        onClose={() => setDimensionTarget(null)}
+        onStockClick={(symbol, name) => {
+          setDimensionTarget(null)
+          setPreviewSymbol(symbol)
+          setPreviewName(name ?? '')
+        }}
+      />
+
+      <WatchlistImportDialog open={importOpen} onClose={() => setImportOpen(false)} />
     </div>
   )
 }
