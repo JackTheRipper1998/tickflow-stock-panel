@@ -953,6 +953,23 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         replace_existing=True,
     )
 
+    # 竞价路径采集 (预注册因子 F3/F6/F7 前瞻数据, 见 auction_path_service 文件头):
+    # 09:16:15 ~ 09:25:15 每分钟一拍趋势层候选池的五档快照 + 实时累计量。
+    # second=15 避开分钟边界; 09:25:15 一拍为竞价撮合定局后的终值。
+    def _auction_path_tick():
+        svc = getattr(_get_app_state(), "auction_path_service", None) if _get_app_state() else None
+        if svc:
+            svc.collect_tick()
+
+    scheduler.add_job(
+        _auction_path_tick,
+        trigger=CronTrigger(day_of_week="mon-fri", hour=9, minute="16-25", second=15,
+                            timezone="Asia/Shanghai"),
+        id="auction_path_tick",
+        misfire_grace_time=30,   # 错过就跳过, 补拍无意义(盘口已变)
+        replace_existing=True,
+    )
+
     # 周期性能力重探: 付费 Key 中途过期/续费无需重启即可被发现。
     # 只热更新 app.state.capabilities(API 端点、盘后管道 _pipeline_then_refresh 均读它);
     # 档位变化记 WARNING, 让「Key 失效」在日志/前端可见, 不再静默按旧档位打 403 端点。

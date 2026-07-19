@@ -96,6 +96,12 @@ async def lifespan(app: FastAPI):
     auction_strength_service.set_repo(repo)
     app.state.auction_strength_service = auction_strength_service
 
+    # 竞价路径采集(预注册因子 F3/F6/F7 前瞻数据, 09:16~09:25 每分钟一拍五档快照)
+    from app.services.auction_path_service import auction_path_service
+    auction_path_service.set_repo(repo)
+    auction_path_service.set_app_state(app.state)
+    app.state.auction_path_service = auction_path_service
+
     # 五档盘口 sealed 服务(真假涨停/跌停, 独立旁路线)
     from app.services.depth_service import DepthService
     depth_service = DepthService()
