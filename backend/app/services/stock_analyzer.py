@@ -21,7 +21,12 @@ from typing import AsyncIterator
 
 import polars as pl
 
-from app.indicators.levels import compute_levels, summarize_levels
+from app.indicators.levels import (
+    compute_levels,
+    compute_squeeze,
+    describe_squeeze,
+    summarize_levels,
+)
 from app.services.financial_sync import get_financial_df
 
 logger = logging.getLogger(__name__)
@@ -198,11 +203,17 @@ def _build_user_prompt(
     close: float | None,
     symbol: str,
     focus: str,
+    squeeze: dict | None = None,
 ) -> str:
     """构建用户消息:标的 + 价位摘要 + 技术指标 JSON + 财务摘要 + 关注点。"""
     parts: list[str] = [
         f"标的标准代码: {symbol}",
         f"关键价位概览: {summarize_levels(levels, close)}",
+    ]
+    sq_text = describe_squeeze(squeeze)
+    if sq_text:
+        parts.append(f"波动状态(布林带+Keltner 挤压): {sq_text}")
+    parts += [
         "",
         "以下是该标的最近日 K 数据(JSON,含 OHLCV 与已计算的技术指标。"
         f"最近 {_KLINE_WINDOW} 个交易日,升序):",
@@ -283,6 +294,7 @@ async def analyze_stock_stream(
 
     # 2. 价位计算(基于 K 线)
     levels = compute_levels(df)
+    squeeze = compute_squeeze(df)
     close = float(df.tail(1)["close"][0]) if "close" in df.columns else None
 
     # 3. 财务(辅助)
@@ -302,7 +314,7 @@ async def analyze_stock_stream(
         from app.services.ai_provider import stream_ai_text
 
         kline_tail = _clean_rows(df, _KLINE_KEEP_COLS)
-        user_prompt = _build_user_prompt(kline_tail, fins, levels, close, symbol, focus)
+        user_prompt = _build_user_prompt(kline_tail, fins, levels, close, symbol, focus, squeeze)
         async for delta in stream_ai_text(
             [
                 {"role": "system", "content": _SYSTEM_PROMPT},

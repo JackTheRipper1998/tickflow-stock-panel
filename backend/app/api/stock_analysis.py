@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.indicators.levels import compute_levels, summarize_levels
+from app.indicators.levels import compute_levels, compute_squeeze, summarize_levels
 from app.services import stock_reports
 from app.services.stock_analyzer import analyze_stock_stream
 
@@ -53,7 +53,7 @@ def _build_series(df: pl.DataFrame) -> dict:
     返回结构(每个 value 都是按日期对齐的数组):
       {
         "boll":      {"upper": [...], "lower": [...]},
-        "keltner_s": {"upper": [...], "lower": [...]},   # 短期 MA20±2ATR
+        "keltner_s": {"upper": [...], "lower": [...]},   # 短期 MA20±1.5ATR(挤压基准)
         "keltner_m": {"upper": [...], "lower": [...]},   # 中期 MA60±2.5ATR
         "keltner_l": {"upper": [...], "lower": [...]},   # 长期 MA120±3ATR
         "atr":       {"stop_loss": [...], "take_profit": [...]},  # close∓2ATR
@@ -87,7 +87,7 @@ def _build_series(df: pl.DataFrame) -> dict:
             }
 
         if "ma20" in df.columns:
-            out["keltner_s"] = _channel(df["ma20"], 2.0)
+            out["keltner_s"] = _channel(df["ma20"], 1.5)   # 挤压基准, 与布林带配对
         if "ma60" in df.columns:
             out["keltner_m"] = _channel(df["ma60"], 2.5)
         if ma120 is not None:
@@ -128,9 +128,10 @@ def get_levels(
                            "boll": [], "keltner_s": [], "keltner_m": [], "keltner_l": [],
                            "atr_stop": [], "gap": [], "fib": [], "round": []},
                 "close": None, "summary": "无数据", "symbol": symbol,
-                "dates": [], "series": {}}
+                "dates": [], "series": {}, "squeeze": None}
 
     levels = compute_levels(df)
+    squeeze = compute_squeeze(df)
     close = float(df.tail(1)["close"][0]) if "close" in df.columns else None
     # 日期 + 带状曲线序列(供前端画 Keltner/ATR/布林带曲线)
     dates = df["date"].to_list()
@@ -142,6 +143,7 @@ def get_levels(
         "symbol": symbol,
         "dates": [str(d) for d in dates],
         "series": series,
+        "squeeze": squeeze,
     }
 
 

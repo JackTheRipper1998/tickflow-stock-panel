@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle } from 'lucide-react'
+import { Sparkles, LineChart, History as HistoryIcon, Loader2, ExternalLink, Bell, AlertTriangle, Zap } from 'lucide-react'
+import type { SqueezeState } from '@/lib/api'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
@@ -219,6 +220,7 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
           <div className="flex items-center gap-2 min-w-0">
             <LineChart className="h-4 w-4 text-sky-400 shrink-0" />
             <span className="text-sm font-medium text-foreground">关键价位分析</span>
+            <SqueezeBadge squeeze={levelsQ.data?.squeeze} />
           </div>
           <div className="flex items-baseline gap-2 shrink-0">
             <span className="text-[10px] text-muted">{rows.length} 个交易日</span>
@@ -242,6 +244,36 @@ function StockAnalysisBoard({ symbol }: { symbol: string }) {
       </div>
     </div>
   )
+}
+
+// ===== 布林带+Keltner 挤压状态徽标 =====
+// 只在「挤压中」或「刚释放」时显示(无挤压不占视觉);挤压=波动萎缩变盘前兆。
+function SqueezeBadge({ squeeze }: { squeeze?: SqueezeState | null }) {
+  if (!squeeze) return null
+  if (squeeze.on) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 rounded-full border border-amber-400/40 bg-amber-400/15 px-2 py-0.5 text-[10px] font-medium text-amber-400"
+        title={`布林带缩进 Keltner 内部,波动极度萎缩,已持续 ${squeeze.bars} 个交易日 —— 变盘/突破前兆`}
+      >
+        <Zap className="h-3 w-3" />挤压中 · {squeeze.bars}日
+      </span>
+    )
+  }
+  if (squeeze.released) {
+    const up = squeeze.direction === 'up'
+    return (
+      <span
+        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+          up ? 'border-bull/40 bg-bull/15 text-bull' : 'border-bear/40 bg-bear/15 text-bear'
+        }`}
+        title={`挤压释放:布林带重新张开冲出 Keltner,方向${up ? '向上' : '向下'}`}
+      >
+        <Zap className="h-3 w-3" />挤压释放 {up ? '↑' : '↓'}
+      </span>
+    )
+  }
+  return null
 }
 
 // ===== 左侧常驻:历史报告侧栏(所有股票,按时间倒序平铺) =====

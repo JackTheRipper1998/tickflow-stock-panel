@@ -49,7 +49,7 @@ export const LEVEL_GROUPS: { key: LevelType; label: string; color: string }[] = 
   { key: 'pivot',    label: '枢轴点',    color: '#8B5CF6' },   // 紫
   { key: 'extreme',  label: '前高前低',  color: '#EAB308' },   // 黄
   { key: 'boll',     label: '布林带',    color: '#F97316' },   // 橙(MA20±2σ 曲线)
-  { key: 'keltner_s',label: 'Keltner短期',  color: '#06B6D4' },   // 青(MA20±2ATR 曲线)
+  { key: 'keltner_s',label: 'Keltner短期',  color: '#06B6D4' },   // 青(MA20±1.5ATR, 挤压基准, 与布林带配对)
   { key: 'keltner_m',label: 'Keltner中期',  color: '#22D3EE' },   // 浅青(MA60±2.5ATR 曲线)
   { key: 'keltner_l',label: 'Keltner长期',  color: '#67E8F9' },   // 更浅青(MA120±3ATR 曲线)
   { key: 'atr_stop', label: 'ATR波动通道',  color: '#EF4444' },   // 红(警示)

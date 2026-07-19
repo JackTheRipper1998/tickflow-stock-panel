@@ -45,7 +45,7 @@ LEVEL_TYPES = {
     "pivot": "枢轴点",        # 经典 Pivot P/R/S
     "extreme": "前高前低",    # 60/250 日极值 + 近期 swing 高低点
     "boll": "布林带",         # MA20 ± 2σ,标准差波动带(参考性,非真实支撑压力)
-    "keltner_s": "Keltner短期",  # MA20 ± 2×ATR
+    "keltner_s": "Keltner短期",  # MA20 ± 1.5×ATR(经典 TTM 挤压基准, 与布林带配对)
     "keltner_m": "Keltner中期",  # MA60 ± 2.5×ATR
     "keltner_l": "Keltner长期",  # MA120 ± 3×ATR(牛熊趋势边界)
     "atr_stop": "ATR波动通道",    # close±nATR 动态波动带(中性命名,非操作指令)
@@ -354,8 +354,14 @@ def _boll_channel(df: pl.DataFrame) -> list[dict]:
 
 
 def _keltner_short(df: pl.DataFrame) -> list[dict]:
-    """Keltner 短期:MA20 ± 2×ATR(近期波动带,约一个月)。"""
-    return _keltner_band(df, "ma20", 20, 2.0, "短期", "keltner_s")
+    """Keltner 短期:MA20 ± 1.5×ATR —— 经典 TTM 挤压基准通道。
+
+    倍数用 1.5(而非波动通道常用的 2~3)且中轨同为 MA20, 是为了和布林带
+    BB(20, 2σ) 对齐做「挤压」判断: 正常波动时布林带比本通道略宽(在外侧),
+    一旦波动萎缩到布林带缩进本通道内部(BB 上轨<KC 上轨 且 BB 下轨>KC 下轨),
+    即为挤压 on(见 compute_squeeze)。
+    """
+    return _keltner_band(df, "ma20", 20, 1.5, "短期", "keltner_s")
 
 
 def _keltner_mid(df: pl.DataFrame) -> list[dict]:
@@ -590,6 +596,98 @@ def compute_levels(df: pl.DataFrame) -> dict[str, list[dict]]:
     except Exception as e:  # noqa: BLE001
         logger.warning("compute_levels failed: %s", e)
         return {k: [] for k in LEVEL_TYPES}
+
+
+def compute_squeeze(df: pl.DataFrame, atr_mult: float = 1.5) -> dict | None:
+    """布林带 + Keltner「挤压(Squeeze)」判断 —— 经典 TTM Squeeze。
+
+    布林带 BB(20, 2σ) 缩进 Keltner KC(20, atr_mult×ATR) 内部 = 波动极度萎缩,
+    常为变盘/突破前兆; 布林带重新张开冲出 KC = 挤压释放, 往往是趋势启动方向。
+
+    判定(逐日):
+        挤压 on ⟺ 布林上轨 < KC 上轨  且  布林下轨 > KC 下轨
+        其中 KC 上/下轨 = MA20 ± atr_mult × ATR14
+        布林上/下轨用数据层预计算的 boll_upper / boll_lower(= MA20 ± 2σ)
+
+    需要 df 含 boll_upper / boll_lower / ma20 / atr_14 列, 缺任一列返回 None。
+
+    Returns:
+        {
+          "on": bool,          # 最新一根是否处于挤压
+          "bars": int,         # 已连续挤压天数(on 时 >0, off 时 0)
+          "fired": bool,       # 最新一根「刚进入」挤压(昨 off 今 on)
+          "released": bool,    # 最新一根「刚释放」挤压(昨 on 今 off)
+          "direction": str,    # 释放方向: "up"/"down"/""(仅 released 时有意义)
+          "series": [bool...], # 每日 on/off, 与 dates 对齐(供图表阴影)
+        }
+    """
+    need = {"boll_upper", "boll_lower", "ma20", "atr_14"}
+    if df.is_empty() or not need.issubset(df.columns) or df.height < 20:
+        return None
+
+    frame = df.select(
+        pl.col("boll_upper"),
+        pl.col("boll_lower"),
+        pl.col("ma20"),
+        pl.col("atr_14"),
+        pl.col("close"),
+    ).with_columns(
+        (pl.col("ma20") + atr_mult * pl.col("atr_14")).alias("_kc_up"),
+        (pl.col("ma20") - atr_mult * pl.col("atr_14")).alias("_kc_lo"),
+    ).with_columns(
+        (
+            (pl.col("boll_upper") < pl.col("_kc_up"))
+            & (pl.col("boll_lower") > pl.col("_kc_lo"))
+            & pl.col("boll_upper").is_not_null()
+            & pl.col("atr_14").is_not_null()
+        ).alias("_on")
+    )
+
+    on_series = frame["_on"].to_list()
+    # null(前 20 根 MA/σ 未成形)统一视为 False
+    series = [bool(v) if v is not None else False for v in on_series]
+    if not series:
+        return None
+
+    on = series[-1]
+    # 连续挤压天数: 从最后一根往前数连续 True
+    bars = 0
+    for v in reversed(series):
+        if v:
+            bars += 1
+        else:
+            break
+    prev = series[-2] if len(series) >= 2 else False
+    fired = on and not prev
+    released = (not on) and prev
+
+    direction = ""
+    if released:
+        close = float(frame["close"][-1]) if _ok(frame["close"][-1]) else None
+        ma20 = float(frame["ma20"][-1]) if _ok(frame["ma20"][-1]) else None
+        if close is not None and ma20 is not None:
+            direction = "up" if close >= ma20 else "down"
+
+    return {
+        "on": on,
+        "bars": bars,
+        "fired": fired,
+        "released": released,
+        "direction": direction,
+        "series": series,
+    }
+
+
+def describe_squeeze(sq: dict | None) -> str:
+    """挤压状态 → 一句话中文摘要(供 AI 提示词 / 前端 tooltip)。"""
+    if not sq:
+        return ""
+    if sq.get("on"):
+        return f"布林带-Keltner 挤压中(已持续 {sq.get('bars', 0)} 日,波动萎缩,变盘前兆)"
+    if sq.get("released"):
+        d = {"up": "向上", "down": "向下"}.get(sq.get("direction", ""), "")
+        return f"挤压刚释放({d}突破)" if d else "挤压刚释放"
+    return "无挤压(布林带在 Keltner 外,波动正常)"
 
 
 def summarize_levels(levels: dict[str, list[dict]], close: float | None) -> str:

@@ -7,7 +7,7 @@
  */
 import { useState, type CSSProperties, type ReactNode } from 'react'
 import { Check, Plus, Eye, EyeOff, RefreshCw } from 'lucide-react'
-import type { KlineRow, MinuteKlineRow } from '@/lib/api'
+import type { KlineRow, MinuteKlineRow, BuyNote } from '@/lib/api'
 import { fmtPrice } from '@/lib/format'
 import type { ColumnConfig } from '@/lib/screener-columns'
 import { getSignals, signalCls } from '@/lib/stock-table'
@@ -34,6 +34,10 @@ interface ScreenerTableProps {
   watchlistPending: boolean
   /** symbol → 日k 数据，仅当启用日k列时传入 */
   klineData?: Record<string, KlineRow[]>
+  /** symbol → 买点备注，仅当启用买点备注列时传入 */
+  buyNotes?: Record<string, BuyNote>
+  /** 买点备注是否正在批量加载 */
+  buyNotesLoading?: boolean
   /** 日k蜡烛图是否显示（表头眼睛开关） */
   dailyKChartVisible?: boolean
   onToggleDailyKChart?: () => void
@@ -143,6 +147,7 @@ function renderExtValue(
 export function ScreenerTable({
   rows, columns, strategyIdToName, symbolStrategyMap, activeStrategy,
   watchlistSet, onPreview, onToggleWatchlist, watchlistPending, klineData = {},
+  buyNotes = {}, buyNotesLoading = false,
   dailyKChartVisible = true, onToggleDailyKChart,
   minuteData = {}, intradayChartVisible = true, onToggleIntradayChart,
   intradayAutoRefresh = false, onRefreshIntraday, intradayRefreshing = false,
@@ -335,6 +340,32 @@ export function ScreenerTable({
                 ? <MiniIntraday rows={rows} prevClose={r.prev_close} changePct={r.change_pct} width={iw - 4} height={ih} />
                 : <span className="text-[10px] text-muted">分时</span>}
             </div>
+          </td>
+        )
+      }
+      case 'buy_note': {
+        const note = buyNotes[r.symbol]
+        const cellKey = `${r.symbol}::${col.id}`
+        const expanded = expandedCells.has(cellKey)
+        return (
+          <td key={col.id} className="px-3 py-2 align-top" style={{ minWidth: 220, maxWidth: 340 }}>
+            {note ? (
+              <div className="text-[11px] leading-snug space-y-0.5">
+                <div className="text-muted">{note.data}</div>
+                <div className="text-accent font-medium">▸ {note.suggestion}</div>
+                <div
+                  className={`text-secondary ${expanded ? '' : 'line-clamp-1'} cursor-pointer`}
+                  onClick={() => toggleExpand(cellKey)}
+                  title={note.reason}
+                >
+                  {note.reason}
+                </div>
+              </div>
+            ) : buyNotesLoading ? (
+              <span className="text-[11px] text-muted">计算中…</span>
+            ) : (
+              <span className="text-[11px] text-muted">—</span>
+            )}
           </td>
         )
       }

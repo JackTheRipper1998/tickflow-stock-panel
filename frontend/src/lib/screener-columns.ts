@@ -72,6 +72,8 @@ export const SCREENER_BUILTIN_COLUMNS: ColumnConfig[] = [
   { id: 'builtin:signals', source: { type: 'builtin', key: 'signals' }, label: '信号', visible: true, align: 'left' },
   { id: 'builtin:candle', source: { type: 'builtin', key: 'candle' }, label: '日k', visible: false, align: 'center' },
   { id: 'builtin:intraday', source: { type: 'builtin', key: 'intraday' }, label: '分时', visible: false, align: 'center' },
+  // 买点备注(按需拉取关键价位 → 客观数据 + 参考买点 + 理由; 默认隐藏, 勾选后才计算)
+  { id: 'builtin:buy_note', source: { type: 'builtin', key: 'buy_note' }, label: '买点备注', visible: false, align: 'left' },
   // 财务指标 (与自选页对齐; 当前后端 enriched 未返回这些字段，默认隐藏)
   { id: 'builtin:eps', source: { type: 'builtin', key: 'eps' }, label: 'EPS', visible: false, align: 'right' },
   { id: 'builtin:bps', source: { type: 'builtin', key: 'bps' }, label: 'BPS', visible: false, align: 'right' },
@@ -95,6 +97,7 @@ export const SCREENER_COLUMN_GROUPS: ColumnGroup[] = [
   { id: 'momentum', label: '动量', icon: '🚀', keys: ['momentum_5d', 'momentum_10d', 'momentum_20d', 'momentum_30d', 'momentum_60d'] },
   { id: 'limit', label: '连板', icon: '🔥', keys: ['limit_ups', 'limit_downs'] },
   { id: 'signal', label: '信号', icon: '📡', keys: ['signals', 'candle', 'intraday'] },
+  { id: 'analysis', label: '分析', icon: '🧭', keys: ['buy_note'] },
   { id: 'finance', label: '财务', icon: '📋', keys: ['eps', 'bps', 'roe', 'pe_ttm', 'pb', 'gross_margin', 'net_margin', 'revenue_yoy', 'net_income_yoy', 'debt_ratio'] },
 ]
 

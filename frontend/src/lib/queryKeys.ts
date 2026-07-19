@@ -82,6 +82,7 @@ export const QK = {
 
   // 概念涨幅轮动矩阵
   rpsRotation:          (days: number, source?: string) => ['rps-rotation', days, source ?? ''] as const,
+  screenerBuyNotes:     (symbols: string[]) => ['screener-buy-notes', symbols.join(',')] as const,
 } as const
 
 // ===== SSE 应该 invalidate 的 key 前缀列表 =====

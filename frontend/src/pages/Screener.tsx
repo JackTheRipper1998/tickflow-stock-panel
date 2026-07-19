@@ -356,6 +356,19 @@ export function Screener() {
   })
   const klineData = dailyKVisible ? (klineBatch.data?.data ?? {}) : {}
 
+  // 买点备注列是否启用 → 按需批量拉取当前可见行的价位备注(逐只算价位较重, 故懒加载 + 缓存)
+  const buyNoteColumnEnabled = useMemo(() =>
+    !!columns.find(c => c.source.type === 'builtin' && c.source.key === 'buy_note' && c.visible),
+    [columns])
+  const buyNoteBatch = useQuery({
+    queryKey: QK.screenerBuyNotes(displayRows.map((r: any) => r.symbol)),
+    queryFn: () => api.screenerBuyNotes(displayRows.map((r: any) => r.symbol)),
+    enabled: buyNoteColumnEnabled && displayRows.length > 0,
+    staleTime: 5 * 60_000,
+  })
+  const buyNotes = buyNoteColumnEnabled ? (buyNoteBatch.data?.notes ?? {}) : {}
+  const buyNotesLoading = buyNoteColumnEnabled && buyNoteBatch.isFetching
+
   // 分时列是否启用 → 决定是否加载批量分时数据 (需 kline.minute.batch 能力)
   const intradayColumn = useMemo(() =>
     columns.find(c => c.source.type === 'builtin' && c.source.key === 'intraday' && c.visible),
@@ -878,6 +891,8 @@ export function Screener() {
                     onToggleWatchlist={(symbol, inList) => toggleWatchlist.mutate({ symbol, inList })}
                     watchlistPending={toggleWatchlist.isPending}
                     klineData={klineData}
+                    buyNotes={buyNotes}
+                    buyNotesLoading={buyNotesLoading}
                     dailyKChartVisible={dailyKChartVisible}
                     onToggleDailyKChart={toggleDailyKChart}
                     minuteData={minuteData}

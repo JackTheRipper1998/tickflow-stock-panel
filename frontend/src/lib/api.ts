@@ -161,6 +161,23 @@ export interface LevelSeries {
   atr?: { stop_loss: (number | null)[]; take_profit: (number | null)[] }
 }
 
+/** 布林带+Keltner 挤压(TTM Squeeze)状态 */
+export interface SqueezeState {
+  on: boolean            // 最新一根是否处于挤压
+  bars: number           // 已连续挤压天数
+  fired: boolean         // 刚进入挤压
+  released: boolean      // 刚释放挤压
+  direction: 'up' | 'down' | ''  // 释放方向
+  series: boolean[]      // 每日 on/off, 与 dates 对齐
+}
+
+/** 策略结果买点备注(客观数据 + 参考买点 + 理由) */
+export interface BuyNote {
+  data: string
+  suggestion: string
+  reason: string
+}
+
 export interface StockLevels {
   levels: Record<LevelType, PriceLevel[]>
   close: number | null
@@ -169,6 +186,8 @@ export interface StockLevels {
   /** dates 与 series 对齐;前端按自身 rows 的日期映射,缺失填 null */
   dates?: string[]
   series?: LevelSeries
+  /** 布林带+Keltner 挤压状态(数据不足时 null) */
+  squeeze?: SqueezeState | null
 }
 
 export interface AiStockReport {
@@ -1803,6 +1822,13 @@ export const api = {
   // ===== 个股分析 =====
   stockAnalysisLevels: (symbol: string, days = 120) =>
     request<StockLevels>(`/api/stock-analysis/levels?symbol=${encodeURIComponent(symbol)}&days=${days}`),
+
+  /** 批量买点备注(策略结果表「买点备注」列, 按需拉取当前可见行) */
+  screenerBuyNotes: (symbols: string[]) =>
+    request<{ notes: Record<string, BuyNote> }>('/api/screener/buy-notes', {
+      method: 'POST',
+      body: JSON.stringify({ symbols }),
+    }),
 
   stockAnalysisReportsList: () =>
     request<{ reports: AiStockReport[] }>('/api/stock-analysis/reports'),

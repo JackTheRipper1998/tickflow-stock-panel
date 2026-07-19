@@ -42,6 +42,11 @@ class PresetRequest(BaseModel):
     timeframe: str = "1d"
 
 
+class BuyNotesRequest(BaseModel):
+    """批量买点备注请求(供策略结果表「买点备注」列按需拉取)。"""
+    symbols: list[str]
+
+
 def _safe(result_dict: dict) -> dict:
     """sanitize for JSON(NaN / Inf → None)."""
     rows = result_dict.get("rows", [])
@@ -319,6 +324,19 @@ def run_preset(req: PresetRequest, request: Request):
     _update_cache_strategy(data_dir, str(as_of), req.strategy_id, safe_data)
 
     return _result_with_ext(safe_data, ext_values)
+
+
+@router.post("/buy-notes")
+def buy_notes(req: BuyNotesRequest, request: Request):
+    """批量生成买点备注(客观数据 + 参考买点 + 理由)。
+
+    纯规则、取内存价位缓存, 供前端策略结果表按需拉取当前可见行。超过 120 只截断。
+    """
+    from app.services.stock_buy_note import build_buy_notes
+
+    repo = request.app.state.repo
+    notes = build_buy_notes(repo, req.symbols)
+    return {"notes": notes}
 
 
 @router.get("/cached")
