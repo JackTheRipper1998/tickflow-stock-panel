@@ -77,6 +77,12 @@ def _load_auction_vols() -> pl.DataFrame:
 
 
 def main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--since", default=None,
+                    help="只统计该日期(含)之后的买入日, 如 2026-07-20 (封版后前瞻段复评用)")
+    args = ap.parse_args()
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
     panel = _load_panel()
     panel = _add_adx_10(panel)
@@ -101,6 +107,8 @@ def main() -> None:
 
     # 只保留买入日有分钟K覆盖的信号日
     covered = trades.filter(pl.col("auc_ratio").is_not_null())
+    if args.since:
+        covered = covered.filter(pl.col("buy_date") >= args.since)
     n_days = covered["didx"].n_unique()
     print(f"\n{'='*102}")
     print(f"strong_momentum_auction 复检: 买入日分钟K覆盖 {n_days} 个信号日 "
@@ -144,6 +152,24 @@ def main() -> None:
         rng = (seg["buy_date"].min(), seg["buy_date"].max()) if seg.height else ("-", "-")
         for hold_label, col in [("T+1开盘卖", "ret_h1"), ("破MA10离场", "ret_trail")]:
             print(fmt(f"现行·{seg_label}({rng[0]}~{rng[1]})·{hold_label}", stats(seg, col)))
+
+    # ── 候选数/市况开关 (2026-07-19 复检清单延伸, 网格预定一次跑完) ──
+    # 门控信号 = T-1收盘纯趋势层候选数 (决策时点可知, 无未来函数)。
+    # 逻辑: 趋势层候选多 = 市场有普涨动量的市况; 候选稀少 = 逆势硬做。
+    print(f"\n{'='*102}")
+    print("候选数/市况开关 (现行策略, T+1开盘卖) — 门控: T-1收盘趋势层候选数")
+    print(f"{'='*102}")
+    trend_count = trades.group_by("didx").agg(pl.len().alias("trend_n"))
+    cur2 = cur.join(trend_count, on="didx", how="left")
+    q1, q2 = trend_count["trend_n"].quantile(0.33), trend_count["trend_n"].quantile(0.67)
+    print(f"趋势层候选数分布: 三分位界 {q1:.0f}/{q2:.0f}, "
+          f"中位 {trend_count['trend_n'].median():.0f}, 均值 {trend_count['trend_n'].mean():.1f}")
+    for label, m in [(f"低候选段(<{q1:.0f})", pl.col("trend_n") < q1),
+                     (f"中候选段([{q1:.0f},{q2:.0f}))", (pl.col("trend_n") >= q1) & (pl.col("trend_n") < q2)),
+                     (f"高候选段(≥{q2:.0f})", pl.col("trend_n") >= q2)]:
+        print(fmt(label, stats(cur2.filter(m), "ret_h1")))
+    for th in (10, 20, 30, 40):
+        print(fmt(f"开关: 仅趋势候选≥{th}日参与", stats(cur2.filter(pl.col("trend_n") >= th), "ret_h1")))
 
     # 原口径对照: 不扣费的现行策略 T+1开盘卖 (与策略文件头 +0.83%/53.3% 直接可比)
     print(f"\n{'='*102}")
