@@ -143,6 +143,20 @@ ENRICHED_COLUMNS: dict[str, dict[str, str]] = {
     "rsi_6":                   "6日相对强弱指标",
     "rsi_14":                  "14日相对强弱指标",
     "rsi_24":                  "24日相对强弱指标",
+    # ── 趋势质量 (DMI/ADX + 趋势结构) ────────────────────
+    "plus_di_14":              "+DI 上升方向指标(14日, Wilder平滑)",
+    "minus_di_14":             "-DI 下降方向指标(14日, Wilder平滑)",
+    "adx_14":                  "ADX 趋势强度(14日, Wilder平滑)",
+    "bull_align_days":         "MA5>MA10>MA20 多头排列已连续维持天数",
+    "ma20_slope_5d":           "MA20 5日斜率 (当日MA20/5日前MA20 - 1)",
+    "ma60_slope_5d":           "MA60 5日斜率 (当日MA60/5日前MA60 - 1)",
+    "low_uplift_10d":          "低点抬高幅度 (近10日最低价/前10日最低价 - 1, >0=低点抬高)",
+    "up_days_10d":             "近10日上涨天数",
+    "reg_slope_20d":           "近20日收盘价线性回归日斜率(占20日均价比例)",
+    "reg_r2_20d":              "近20日收盘价线性回归 R² (趋势线性度, 0~1)",
+    "updown_vol_ratio_10d":    "近10日上涨日平均成交量/下跌日平均成交量",
+    "obv":                     "能量潮 OBV (数据窗口内累计, 仅相对变化有意义)",
+    "obv_ma20_slope_5d":       "OBV 20日均线5日变化量(以20日均量为单位, >0=OBV均线向上)",
     # ── 开盘抢筹强度 (盘中实时注入, 见 opening_surge_service) ──
     "opening_vol_ratio_5d":    "开盘5分钟成交量 / 自身过去5日同时段均量 (09:36后才有值)",
     # ── 集合竞价强弱 (盘中实时注入, 见 auction_strength_service) ──
@@ -195,6 +209,10 @@ ENRICHED_COLUMNS_BY_CATEGORY: dict[str, list[str]] = {
     "momentum": ["momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d"],
     "volatility": ["annual_vol_20d"],
     "rsi":      ["rsi_6", "rsi_14", "rsi_24"],
+    "trend_quality": ["plus_di_14", "minus_di_14", "adx_14", "bull_align_days",
+                      "ma20_slope_5d", "ma60_slope_5d", "low_uplift_10d", "up_days_10d",
+                      "reg_slope_20d", "reg_r2_20d", "updown_vol_ratio_10d",
+                      "obv", "obv_ma20_slope_5d"],
     "opening_surge": ["opening_vol_ratio_5d"],
     "auction_strength": ["gap_pct", "gap_type", "auction_vol_ratio", "volume_type"],
     "signals":  [k for k in ENRICHED_COLUMNS if k.startswith("signal_")],
@@ -306,6 +324,13 @@ _INDICATOR_DEPS: dict[str, set[str]] = {
     "rsi_6": {"_delta", "_gain", "_loss"},
     "rsi_14": {"_delta", "_gain", "_loss"},
     "rsi_24": {"_delta", "_gain", "_loss"},
+    "plus_di_14": {"_tr", "_dm_plus"},
+    "minus_di_14": {"_tr", "_dm_minus"},
+    "adx_14": {"plus_di_14", "minus_di_14"},
+    "bull_align_days": {"ma5", "ma10", "ma20"},
+    "ma20_slope_5d": {"ma20"},
+    "ma60_slope_5d": {"ma60"},
+    "obv_ma20_slope_5d": {"obv"},
 }
 
 # compute_indicators 可产出的全部指标/临时列 (needed=None 时即为此全集, 行为不变)
@@ -320,6 +345,11 @@ _ALL_INDICATOR_COLS: frozenset[str] = frozenset({
     "momentum_5d", "momentum_10d", "momentum_20d", "momentum_30d", "momentum_60d",
     "change_pct", "change_amount", "amplitude", "_daily_pct", "annual_vol_20d",
     "rsi_6", "rsi_14", "rsi_24",
+    "_dm_plus", "_dm_minus",
+    "plus_di_14", "minus_di_14", "adx_14",
+    "bull_align_days", "ma20_slope_5d", "ma60_slope_5d",
+    "low_uplift_10d", "up_days_10d", "reg_slope_20d", "reg_r2_20d",
+    "updown_vol_ratio_10d", "obv", "obv_ma20_slope_5d",
 })
 
 
@@ -402,6 +432,17 @@ def compute_indicators(df: pl.DataFrame, needed: set[str] | None = None) -> pl.D
             (pl.col("high") - prev_close).abs(),
             (pl.col("low") - prev_close).abs(),
         ).alias("_tr"))
+    if "_dm_plus" in want or "_dm_minus" in want:
+        _up_move = pl.col("high") - pl.col("high").shift(1).over("symbol")
+        _down_move = pl.col("low").shift(1).over("symbol") - pl.col("low")
+        if "_dm_plus" in want:
+            _p1.append(
+                pl.when((_up_move > _down_move) & (_up_move > 0))
+                  .then(_up_move).otherwise(0.0).alias("_dm_plus"))
+        if "_dm_minus" in want:
+            _p1.append(
+                pl.when((_down_move > _up_move) & (_down_move > 0))
+                  .then(_down_move).otherwise(0.0).alias("_dm_minus"))
     if "vol_ma5" in want:
         _p1.append(pl.col("volume").rolling_mean(5).over("symbol").alias("vol_ma5"))
     if "vol_ma10" in want:
@@ -527,10 +568,126 @@ def compute_indicators(df: pl.DataFrame, needed: set[str] | None = None) -> pl.D
 
     # Pass 6: 换手率 (需要 float_shares, 后续在 compute_all 中 JOIN instruments 后补充)
 
+    # Pass 7: 趋势质量 (DMI/ADX + 趋势结构指标)
+    if want & {"plus_di_14", "minus_di_14"}:
+        # Wilder 平滑 (与 atr_14 同款 ewm alpha=1/14); DI = 100 × 平滑DM / 平滑TR
+        df = df.with_columns(
+            pl.col("_tr").ewm_mean(alpha=1.0 / 14, adjust=False).over("symbol").alias("_tr_ewm14"),
+        )
+        _di_exprs: list[pl.Expr] = []
+        if "plus_di_14" in want:
+            _di_exprs.append(
+                pl.when(pl.col("_tr_ewm14") > 0)
+                  .then(100 * pl.col("_dm_plus").ewm_mean(alpha=1.0 / 14, adjust=False).over("symbol")
+                        / pl.col("_tr_ewm14"))
+                  .otherwise(None).alias("plus_di_14"))
+        if "minus_di_14" in want:
+            _di_exprs.append(
+                pl.when(pl.col("_tr_ewm14") > 0)
+                  .then(100 * pl.col("_dm_minus").ewm_mean(alpha=1.0 / 14, adjust=False).over("symbol")
+                        / pl.col("_tr_ewm14"))
+                  .otherwise(None).alias("minus_di_14"))
+        df = df.with_columns(_di_exprs)
+    if "adx_14" in want:
+        _di_sum = pl.col("plus_di_14") + pl.col("minus_di_14")
+        df = df.with_columns(
+            pl.when(_di_sum > 0)
+              .then(100 * (pl.col("plus_di_14") - pl.col("minus_di_14")).abs() / _di_sum)
+              .otherwise(None).alias("_dx"),
+        ).with_columns(
+            pl.col("_dx").ewm_mean(alpha=1.0 / 14, adjust=False).over("symbol").alias("adx_14"),
+        )
+    if "bull_align_days" in want:
+        # 连续多头排列天数: 与 consecutive_limit_ups 相同的分组累计套路
+        _bull = (pl.col("ma5") > pl.col("ma10")) & (pl.col("ma10") > pl.col("ma20"))
+        df = df.with_columns(
+            _bull.fill_null(False).alias("_bull_cond"),
+        ).with_columns(
+            (~pl.col("_bull_cond")).cast(pl.UInt32).cum_sum().over("symbol").alias("_grp_bull"),
+        ).with_columns(
+            pl.when(pl.col("_bull_cond"))
+              .then(pl.col("_bull_cond").cast(pl.UInt32).cum_sum().over("symbol", "_grp_bull"))
+              .otherwise(0)
+              .cast(pl.UInt32).alias("bull_align_days"),
+        )
+    _p7: list[pl.Expr] = []
+    if "ma20_slope_5d" in want:
+        _p7.append((pl.col("ma20") / pl.col("ma20").shift(5).over("symbol") - 1).alias("ma20_slope_5d"))
+    if "ma60_slope_5d" in want:
+        _p7.append((pl.col("ma60") / pl.col("ma60").shift(5).over("symbol") - 1).alias("ma60_slope_5d"))
+    if "low_uplift_10d" in want:
+        _low10 = pl.col("low").rolling_min(10)
+        _p7.append(
+            (_low10.over("symbol") / _low10.shift(10).over("symbol") - 1).alias("low_uplift_10d"))
+    if "up_days_10d" in want:
+        _p7.append(
+            (pl.col("close").diff() > 0).cast(pl.Int8).rolling_sum(10).over("symbol")
+            .cast(pl.Int32).alias("up_days_10d"))
+    if "updown_vol_ratio_10d" in want:
+        _chg = pl.col("close").diff()
+        _upv = (pl.col("volume") * (_chg > 0).cast(pl.Int8)).rolling_sum(10)
+        _upc = (_chg > 0).cast(pl.Int8).rolling_sum(10)
+        _dnv = (pl.col("volume") * (_chg < 0).cast(pl.Int8)).rolling_sum(10)
+        _dnc = (_chg < 0).cast(pl.Int8).rolling_sum(10)
+        _up_avg = (_upv / _upc).over("symbol")
+        _dn_avg = (_dnv / _dnc).over("symbol")
+        _p7.append(
+            pl.when((_dn_avg > 0) & _up_avg.is_not_null())
+              .then(_up_avg / _dn_avg)
+              .otherwise(None).alias("updown_vol_ratio_10d"))
+    if "obv" in want:
+        _chg = pl.col("close").diff()
+        _p7.append(
+            pl.when(_chg > 0).then(pl.col("volume"))
+              .when(_chg < 0).then(-pl.col("volume"))
+              .otherwise(0.0)
+              .cum_sum().over("symbol").alias("obv"))
+    if _p7:
+        df = df.with_columns(_p7)
+    if "obv_ma20_slope_5d" in want:
+        _obv_ma20 = pl.col("obv").rolling_mean(20)
+        _vol_ma20 = pl.col("volume").rolling_mean(20)
+        df = df.with_columns(
+            pl.when(_vol_ma20.over("symbol") > 0)
+              .then((_obv_ma20.over("symbol") - _obv_ma20.shift(5).over("symbol"))
+                    / _vol_ma20.over("symbol"))
+              .otherwise(None).alias("obv_ma20_slope_5d"),
+        )
+    if want & {"reg_slope_20d", "reg_r2_20d"}:
+        # 近20日收盘价对时间的线性回归: 用滚动矩法 (cov/var), x=组内行号
+        df = df.with_columns(
+            pl.int_range(pl.len()).over("symbol").cast(pl.Float64).alias("_reg_x"),
+        ).with_columns([
+            pl.col("_reg_x").rolling_mean(20).over("symbol").alias("_reg_mx"),
+            pl.col("close").rolling_mean(20).over("symbol").alias("_reg_my"),
+            (pl.col("_reg_x") * pl.col("close")).rolling_mean(20).over("symbol").alias("_reg_mxy"),
+            (pl.col("_reg_x") ** 2).rolling_mean(20).over("symbol").alias("_reg_mx2"),
+            (pl.col("close") ** 2).rolling_mean(20).over("symbol").alias("_reg_my2"),
+        ])
+        _cov = pl.col("_reg_mxy") - pl.col("_reg_mx") * pl.col("_reg_my")
+        _varx = pl.col("_reg_mx2") - pl.col("_reg_mx") ** 2
+        _vary = pl.col("_reg_my2") - pl.col("_reg_my") ** 2
+        _p7b: list[pl.Expr] = []
+        if "reg_slope_20d" in want:
+            # 日斜率归一化为占20日均价的比例, 跨股票可比
+            _p7b.append(
+                pl.when((_varx > 0) & (pl.col("_reg_my") > 0))
+                  .then(_cov / _varx / pl.col("_reg_my"))
+                  .otherwise(None).alias("reg_slope_20d"))
+        if "reg_r2_20d" in want:
+            _p7b.append(
+                pl.when((_varx > 0) & (_vary > 1e-12))
+                  .then(_cov ** 2 / (_varx * _vary))
+                  .otherwise(None).alias("reg_r2_20d"))
+        df = df.with_columns(_p7b)
+
     # 清理临时列 (只丢弃实际存在的临时列)
     _temp_cols = ["_boll_std", "_tr", "_ema12", "_ema26",
                   "_kdj_ln", "_kdj_hn", "_vol_ma5", "_vol_ma5_prev", "_daily_pct",
                   "_delta", "_gain", "_loss",
+                  "_dm_plus", "_dm_minus", "_tr_ewm14", "_dx",
+                  "_bull_cond", "_grp_bull",
+                  "_reg_x", "_reg_mx", "_reg_my", "_reg_mxy", "_reg_mx2", "_reg_my2",
                   "_rsi_avg_gain_6", "_rsi_avg_loss_6",
                   "_rsi_avg_gain_14", "_rsi_avg_loss_14",
                   "_rsi_avg_gain_24", "_rsi_avg_loss_24"]
