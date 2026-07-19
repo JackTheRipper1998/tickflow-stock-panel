@@ -6,6 +6,8 @@ META = {
     "name": "前高再攻",
     "description": "经历一轮完整下跌趋势后上涨，当前价格接近前高（下跌起点）",
     "tags": ["前高", "回踩", "再攻"],
+    "asset_types": ["stock"],
+    "timeframes": ["1d"],
     "params": [
         {"id": "gap_pct", "label": "距前高最大比例", "type": "float",
          "default": 0.15, "min": 0.02, "max": 0.20, "step": 0.01},
