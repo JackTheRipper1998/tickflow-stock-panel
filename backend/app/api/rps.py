@@ -19,6 +19,9 @@ router = APIRouter(prefix="/api/rps", tags=["rps"])
 def get_rotation(
     request: Request,
     days: int = Query(12, ge=7, le=30, description="最近 N 个交易日(7-30)"),
+    source: str | None = Query(
+        None, description="概念数据源 ext config id(如 ext_kpl_theme / ext_gn_ths), 缺省=合并所有"
+    ),
 ) -> dict:
     """概念涨幅轮动矩阵。
 
@@ -27,13 +30,14 @@ def get_rotation(
         columns: {日期: [[概念名, 涨幅小数], ...]} 每列各自降序
         concept_count: 去重概念总数
     """
-    return rps_rotation.build_rps_rotation(request.app.state.repo, days)
+    return rps_rotation.build_rps_rotation(request.app.state.repo, days, source)
 
 
 class AnalyzeRequest(BaseModel):
     """AI 概念轮动分析请求。"""
     days: int = 12   # 分析最近 N 个交易日
     focus: str = ""  # 用户追加的关注点
+    source: str | None = None  # 概念数据源 ext config id, 与轮动矩阵同源
 
 
 @router.post("/rotation-analyze")
@@ -56,7 +60,7 @@ async def analyze_rotation(request: Request, req: AnalyzeRequest):
 
     async def stream_gen():
         async for chunk in analyze_rotation_stream(
-            repo, days, req.focus, quote_service, depth_service,
+            repo, days, req.focus, quote_service, depth_service, req.source,
         ):
             yield chunk + "\n"
 

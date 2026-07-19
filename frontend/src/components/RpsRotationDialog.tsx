@@ -11,6 +11,8 @@ import { Modal } from '@/components/Modal'
 
 interface Props {
   onClose: () => void
+  /** 概念数据源 ext config id(与概念分析页数据源切换同步)。缺省=后端合并所有概念源。 */
+  source?: string
 }
 
 const DEFAULT_DAYS = 12
@@ -45,7 +47,7 @@ function rankColorClass(rank: number, total: number): string {
   return 'text-accent'
 }
 
-export function RpsRotationDialog({ onClose }: Props) {
+export function RpsRotationDialog({ onClose, source }: Props) {
   const [days, setDays] = useState(DEFAULT_DAYS)
   const [reversed, setReversed] = useState(false)        // false=高→低, true=低→高
   const [selected, setSelected] = useState<string | null>(null)  // 点中的概念名, 高亮追踪
@@ -63,7 +65,7 @@ export function RpsRotationDialog({ onClose }: Props) {
     setAnalysisError('')
     setAnalysisMeta(null)
     try {
-      for await (const ev of api.rotationAnalyzeStream(daysParam, focusParam)) {
+      for await (const ev of api.rotationAnalyzeStream(daysParam, focusParam, source)) {
         if (ev.type === 'meta') setAnalysisMeta({ summary: ev.summary })
         else if (ev.type === 'delta') setAnalysis(a => a + (ev.content ?? ''))
         else if (ev.type === 'error') setAnalysisError(ev.message ?? '未知错误')
@@ -74,12 +76,12 @@ export function RpsRotationDialog({ onClose }: Props) {
     } finally {
       setAnalyzing(false)
     }
-  }, [])
+  }, [source])
 
   // 数据请求: React Query 缓存, 同 days 5 分钟内重开秒开
   const { data, isLoading, error } = useQuery({
-    queryKey: QK.rpsRotation(days),
-    queryFn: () => api.rpsRotation(days),
+    queryKey: QK.rpsRotation(days, source),
+    queryFn: () => api.rpsRotation(days, source),
     staleTime: 5 * 60 * 1000,
   })
 

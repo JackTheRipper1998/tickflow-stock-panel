@@ -38,9 +38,16 @@ _cache_ts: dict[str, float] = {}
 
 
 def invalidate_cache() -> None:
-    """清空轮动矩阵结果缓存(数据管道完成后调用, 避免返回旧数据)。"""
+    """清空轮动矩阵结果缓存(数据管道完成后调用, 避免返回旧数据)。
+
+    连同各数据源的 symbol→概念 映射缓存一并清空 —— 概念成分股在数据管道
+    刷新后可能变化(如重新拉取开盘啦题材), 不清会返回旧映射。
+    """
     _cache.clear()
     _cache_ts.clear()
+    _concept_map_cache.clear()
+    _concept_map_count.clear()
+    _concept_map_ts.clear()
 
 
 def _latest_enriched_date(repo) -> date | None:
@@ -51,34 +58,46 @@ def _latest_enriched_date(repo) -> date | None:
     return cache["date"].max()
 
 
-def _load_concept_map_df(repo) -> tuple[pl.DataFrame, int]:
+def _load_concept_map_df(repo, source: str | None = None) -> tuple[pl.DataFrame, int]:
     """构建并缓存 {symbol_upper → 概念} 的已展开 polars 映射表。
 
     复用 market_overview_builder 的概念识别 + 成分股读取逻辑(_dimension_field /
     _read_ext_rows / _symbol_keys / _dimension_values), 但要的是「反向映射」
     (symbol → 概念), 且直接产出 polars DataFrame 供 join 使用。
 
+    Args:
+        source: 概念数据源(ext config id, 如 "ext_kpl_theme" / "ext_gn_ths")。
+            指定时只读该数据源(与概念分析页的数据源切换同步);为 None 时合并
+            所有含概念维度的 ext 配置(向后兼容旧行为)。
+
     返回 (map_df, concept_count):
       - map_df: 两列 (_sym_up: 大写 symbol, concept: 概念名), 已 explode, 一个
         symbol 属多概念时有多行。无概念数据时返回空 DataFrame。
       - concept_count: 去重概念总数。
 
-    缓存: 概念成分股是 snapshot, 进程内不变, 缓存 600s。
+    缓存: 概念成分股是 snapshot, 进程内不变, 按数据源分桶缓存 600s。
     直接缓存 DataFrame 而非 Python dict —— 后续 join 时省掉每次 ~1s 的 dict→DataFrame
     重建开销(这是结果缓存失效后重算的主要瓶颈)。
     """
-    global _concept_map_cache, _concept_map_count, _concept_map_ts
+    bucket = source or ""
     now = time.time()
-    if _concept_map_cache is not None and (now - _concept_map_ts) < 600:
-        return _concept_map_cache, _concept_map_count
+    cached = _concept_map_cache.get(bucket)
+    if cached is not None and (now - _concept_map_ts.get(bucket, 0)) < 600:
+        return cached, _concept_map_count.get(bucket, 0)
 
     data_dir = repo.store.data_dir
     store = ExtConfigStore(data_dir)
+    # source 指定 → 只取该配置; 否则遍历全部含概念维度的配置
+    if source:
+        one = store.get(source)
+        configs = [one] if one is not None else []
+    else:
+        configs = store.load_all()
     # 先收集成扁平的 (sym, concept) 行, 再一次性构造 DataFrame(比 list 列快得多)
     pairs: list[tuple[str, str]] = []
     concepts_seen: set[str] = set()
 
-    for config in store.load_all():
+    for config in configs:
         field = _dimension_field(config, "concept")
         if not field:
             continue
@@ -95,31 +114,34 @@ def _load_concept_map_df(repo) -> tuple[pl.DataFrame, int]:
     if pairs:
         # 去重: 同一 (symbol, concept) 对会因多 key 形式(SZ/000001)和
         # 多 config 重复出现, 去重后从 ~48万 行降到 ~14万, join 快 3x+
-        _concept_map_cache = pl.DataFrame(
+        map_df = pl.DataFrame(
             {"_sym_up": [p[0] for p in pairs], "concept": [p[1] for p in pairs]},
             schema={"_sym_up": pl.Utf8, "concept": pl.Utf8},
         ).unique()
-        _concept_map_count = len(concepts_seen)
+        count = len(concepts_seen)
     else:
-        _concept_map_cache = pl.DataFrame(
-            schema={"_sym_up": pl.Utf8, "concept": pl.Utf8}
-        )
-        _concept_map_count = 0
-    _concept_map_ts = now
-    return _concept_map_cache, _concept_map_count
+        map_df = pl.DataFrame(schema={"_sym_up": pl.Utf8, "concept": pl.Utf8})
+        count = 0
+    _concept_map_cache[bucket] = map_df
+    _concept_map_count[bucket] = count
+    _concept_map_ts[bucket] = now
+    return map_df, count
 
 
-_concept_map_cache: pl.DataFrame | None = None
-_concept_map_count: int = 0
-_concept_map_ts: float = 0.0
+# 按数据源(ext config id, "" = 全部)分桶的映射缓存
+_concept_map_cache: dict[str, pl.DataFrame] = {}
+_concept_map_count: dict[str, int] = {}
+_concept_map_ts: dict[str, float] = {}
 
 
-def build_rps_rotation(repo, days: int = 12) -> dict:
+def build_rps_rotation(repo, days: int = 12, source: str | None = None) -> dict:
     """构建概念涨幅轮动矩阵。
 
     Args:
         repo: KlineRepository(含 _enriched_history_cache 内存历史)。
         days: 取最近 N 个交易日, 范围 [7, 30], 默认 12。
+        source: 概念数据源(ext config id, 如 "ext_kpl_theme" / "ext_gn_ths"),
+            与概念分析页的数据源切换同步; None = 合并所有概念源(向后兼容)。
 
     Returns:
         {
@@ -136,17 +158,18 @@ def build_rps_rotation(repo, days: int = 12) -> dict:
     if latest is None:
         return {"dates": [], "columns": {}, "concept_count": 0}
 
-    cache_key = latest.isoformat()
+    # 缓存键含数据源: 不同 source 的矩阵各存一份, 互不覆盖
+    cache_key = f"{source or ''}:{latest.isoformat()}"
     now = time.time()
     cached = _cache.get(cache_key)
     if cached and (now - _cache_ts.get(cache_key, 0)) < _CACHE_TTL:
         # 缓存的是所有日期, 按需要的 days 截取(避免不同 days 各存一份)
         return _slice_cached(cached, days)
 
-    # 1. 概念映射(symbol → 概念), 已缓存为 polars DataFrame
-    map_df, concept_count = _load_concept_map_df(repo)
+    # 1. 概念映射(symbol → 概念), 按数据源缓存为 polars DataFrame
+    map_df, concept_count = _load_concept_map_df(repo, source)
     if map_df.is_empty():
-        logger.info("rps_rotation: no concept data (ext_gn_ths not fetched yet)")
+        logger.info("rps_rotation: no concept data (source=%s)", source or "all")
         return {"dates": [], "columns": {}, "concept_count": 0}
 
     # 2. 取最近 N 交易日的个股 change_pct(命中内存缓存)

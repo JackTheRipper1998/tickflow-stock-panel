@@ -296,6 +296,7 @@ async def analyze_rotation_stream(
     focus: str = "",
     quote_service=None,
     depth_service=None,
+    source: str | None = None,
 ) -> AsyncIterator[str]:
     """流式概念轮动分析: yield 出每个 NDJSON 事件。
 
@@ -304,12 +305,13 @@ async def analyze_rotation_stream(
         days: 分析最近 N 个交易日 (7-30)。
         focus: 用户追加的关注点。
         quote_service / depth_service: 可选, 大盘背景装配依赖。
+        source: 概念数据源(ext config id), 与轮动矩阵/概念分析页保持同一数据源。
     """
     from app.services.rps_rotation import build_rps_rotation
     from app.services.market_overview_builder import build_market_overview
 
-    # 1. 取轮动矩阵
-    rotation = build_rps_rotation(repo, days)
+    # 1. 取轮动矩阵(与前端选中的数据源一致)
+    rotation = build_rps_rotation(repo, days, source)
     dates = rotation.get("dates") or []
     columns = rotation.get("columns") or {}
 

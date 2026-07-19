@@ -1442,8 +1442,11 @@ export const api = {
   overviewMarket: (asOf?: string) => request<OverviewMarket>(`/api/overview/market${asOf ? `?as_of=${asOf}` : ''}`),
 
   // 概念涨幅轮动矩阵: 每列(日期)各自把所有概念按当天涨幅从高到低排序
-  rpsRotation: (days: number) =>
-    request<RpsRotationData>(`/api/rps/rotation?days=${days}`),
+  // source: 概念数据源 ext config id(与概念分析页数据源切换同步), 缺省=合并所有
+  rpsRotation: (days: number, source?: string) =>
+    request<RpsRotationData>(
+      `/api/rps/rotation?days=${days}${source ? `&source=${encodeURIComponent(source)}` : ''}`,
+    ),
 
   limitLadder: (asOf?: string, extColumns?: string, direction?: 'up' | 'down') => {
     const params = new URLSearchParams()
@@ -1925,8 +1928,8 @@ export const api = {
     }
   },
 
-  /** AI 概念轮动分析 — 流式 NDJSON。 */
-  async *rotationAnalyzeStream(days: number, focus?: string): AsyncGenerator<{
+  /** AI 概念轮动分析 — 流式 NDJSON。source: 概念数据源, 与轮动矩阵同源。 */
+  async *rotationAnalyzeStream(days: number, focus?: string, source?: string): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done'
     days?: number
     summary?: string
@@ -1936,7 +1939,7 @@ export const api = {
     const res = await fetch('/api/rps/rotation-analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ days, focus: focus ?? '' }),
+      body: JSON.stringify({ days, focus: focus ?? '', source: source ?? null }),
     })
     if (!res.ok) {
       let detail = ''

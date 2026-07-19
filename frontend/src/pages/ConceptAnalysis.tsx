@@ -23,6 +23,7 @@ import { storage } from '@/lib/storage'
 import { fmtBigNum, fmtPct, priceColorClass } from '@/lib/format'
 import { cn } from '@/lib/cn'
 import { resolveDimension, type DimensionGroup, type StockRow } from '@/lib/analysis-adapter'
+import { CONCEPT_SOURCE_TABLE, CONCEPT_SOURCE_LABEL, type ConceptSource } from '@/components/WatchlistConceptPanel'
 
 const KEYWORDS = ['concept', '概念', 'theme', '题材', '板块']
 const CANDIDATE_FIELDS = ['concept', '概念', 'theme', '题材', '板块', 'concept_name', '概念名称']
@@ -322,6 +323,16 @@ export function ConceptAnalysis() {
     setSelectedKey(null)
   }
 
+  // 数据源切换(开盘啦 / 同花顺): 两表列结构一致(所属概念), 只换底层 ext 表。
+  // 复用 handleSaveConfig 持久化到 conceptAnalysisConfig; 清空 dimensionField 让新表自动
+  // 解析概念字段, 避免沿用另一数据源上钉死的维度。
+  const activeSource = (Object.keys(CONCEPT_SOURCE_TABLE) as ConceptSource[])
+    .find(s => CONCEPT_SOURCE_TABLE[s] === activeConfigId)
+  const handleSourceChange = (s: ConceptSource) => {
+    if (CONCEPT_SOURCE_TABLE[s] === activeConfigId) return
+    handleSaveConfig({ ...fieldConfig, configId: CONCEPT_SOURCE_TABLE[s], dimensionField: undefined })
+  }
+
   if (configsQuery.isLoading) {
     return <div className="flex h-full items-center justify-center"><RefreshCw className="h-5 w-5 animate-spin text-muted" /></div>
   }
@@ -361,6 +372,22 @@ export function ConceptAnalysis() {
         subtitle={`${marketQuery.data?.as_of ?? rowsQuery.data?.date ?? '最新'} · ${stats.length} 个概念 · ${totalSymbols} 只标的`}
         right={
           <div className="flex items-center gap-1">
+            {/* 数据源切换: 开盘啦 / 同花顺 (两表列结构一致, 只换底层 ext 表) */}
+            <div className="inline-flex items-center rounded-btn bg-elevated p-0.5 mr-1">
+              {(['kpl', 'ths'] as const).map(s => (
+                <button
+                  key={s}
+                  onClick={() => handleSourceChange(s)}
+                  className={cn(
+                    'px-2 py-1 rounded text-[11px] leading-tight transition-colors',
+                    activeSource === s ? 'bg-accent/20 text-accent font-medium' : 'text-muted hover:text-foreground',
+                  )}
+                  title={s === 'kpl' ? '开盘啦题材库(时效/质量更好)' : '同花顺概念'}
+                >
+                  {CONCEPT_SOURCE_LABEL[s]}
+                </button>
+              ))}
+            </div>
             {/* RPS 轮动: 打开涨幅轮动矩阵对话框 */}
             <button
               onClick={() => setShowRps(true)}
@@ -438,7 +465,7 @@ export function ConceptAnalysis() {
       )}
 
       <AnimatePresence>
-        {showRps && <RpsRotationDialog onClose={() => setShowRps(false)} />}
+        {showRps && <RpsRotationDialog source={activeConfigId} onClose={() => setShowRps(false)} />}
       </AnimatePresence>
     </>
   )
